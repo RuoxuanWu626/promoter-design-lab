@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import mimetypes
 import os
 import socket
@@ -109,6 +110,22 @@ def job_status(jid: str) -> dict | None:
 # Helpers
 # ---------------------------------------------------------------------------
 
+def json_safe(obj):
+    """Recursively replace non-finite floats with None so the payload is valid JSON."""
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [json_safe(v) for v in obj]
+    if isinstance(obj, np.ndarray):
+        return json_safe(obj.tolist())
+    if isinstance(obj, np.floating):
+        v = float(obj)
+        return v if math.isfinite(v) else None
+    return obj
+
+
 class JSONEncoder(json.JSONEncoder):
     def default(self, o):
         if isinstance(o, (np.integer,)):
@@ -142,7 +159,8 @@ def _background_from(body: dict) -> dict:
         tss_index=p.get("tss_index"),
         gc=float(p.get("gc", 0.45)),
         cpg_oe=float(p.get("cpg_oe", 0.25)),
-        seed=p.get("seed"))
+        seed=p.get("seed"),
+        scrub_celltype_elements=bool(p.get("scrub_celltype_elements", True)))
 
 
 def _backgrounds_from(body: dict) -> list[dict]:
@@ -211,6 +229,48 @@ def _evaluate(body: dict) -> dict:
             celltype = {"error": f"{type(exc).__name__}: {exc}",
                         "model": ct_model}
 
+    # --- agreement between the simple model and the deep model -------------
+    # "simple" is Puffin: ten interpretable motif filters. "deep" is the
+    # cell-type model (AlphaGenome). Pearson r answers whether they rise and
+    # fall together along the sequence, after both are put on a common scale.
+    agreement = None
+    try:
+        entries = []
+        for m, pr in out_profiles.items():
+            if pr.get("error"):
+                continue
+            entries.append({
+                "name": m,
+                "label": (adapters.get_profile_adapter(m).label if m in
+                          [a["name"] for a in adapters.list_models()["profile"]] else m),
+                "positions": pr["positions"], "values": pr["tracks"]["plus"],
+                "output_space": pr["output_space"],
+                "role": "simple" if "puffin" in m else "profile",
+            })
+        if celltype and not celltype.get("error"):
+            prof = np.asarray(celltype["profiles"], dtype=float)
+            entries.append({
+                "name": f"{celltype['model']}:panel_mean",
+                "label": f"{ct_model} (mean over {len(celltype['cell_types'])} cell types)",
+                "positions": celltype["positions"],
+                "values": prof.mean(axis=0),
+                "output_space": celltype["output_space"], "role": "deep",
+            })
+            if target and target in celltype["cell_types"]:
+                ti = celltype["cell_types"].index(target)
+                entries.append({
+                    "name": f"{celltype['model']}:{target}",
+                    "label": f"{ct_model} ({target})",
+                    "positions": celltype["positions"], "values": prof[ti],
+                    "output_space": celltype["output_space"], "role": "deep",
+                })
+        if len(entries) >= 2:
+            agreement = scoring.profile_agreement(
+                entries, transform=body.get("agreement_transform", "log1p"),
+                window=tuple(body.get("agreement_window") or act_win))
+    except Exception as exc:
+        agreement = {"error": f"{type(exc).__name__}: {exc}"}
+
     weights = body.get("weights") or scoring.DEFAULT_WEIGHTS_DESIGN
     score = scoring.weighted_score(metrics, weights)
 
@@ -221,6 +281,8 @@ def _evaluate(body: dict) -> dict:
         "background": {"hash": sequence_hash(bg["sequence"]),
                        "stats": bg.get("achieved", {}),
                        "requested": bg.get("requested", {}),
+                       "scrubbed_celltype_sites": bg.get("scrubbed_celltype_sites", 0),
+                       "scrub_note": bg.get("scrub_note"),
                        "tss_index": bg["tss_index"]},
         "window": list(window),
         "profiles": out_profiles,
@@ -228,6 +290,7 @@ def _evaluate(body: dict) -> dict:
         "metrics": metrics,
         "score": score,
         "weights": weights,
+        "agreement": agreement,
     }
 
 
@@ -244,9 +307,13 @@ def route(path: str, body: dict, query: dict) -> dict:
                 "store": store.stats(), "pid": os.getpid()}
 
     if path == "/api/motifs":
+        from motifs import celltype_element_order
         return {
             "order": library_order(),
             "motifs": [lib[m].to_json() for m in library_order()],
+            "celltype_order": celltype_element_order(),
+            "celltype_elements": [lib[m].to_json() for m in celltype_element_order()
+                                  if m in lib],
             "extra_elements": [
                 {"id": CPG_SEGMENT_ID, "name": "CpG-rich segment",
                  "kind": "segment", "color": "#7f8c8d",
@@ -257,10 +324,20 @@ def route(path: str, body: dict, query: dict) -> dict:
                  "notes": "Any literal sequence you paste, so Mode 1 can slide "
                           "an arbitrary segment relative to the TSS."},
             ],
-            "provenance": ("Consensus strings and PWMs are hand-written "
-                           "placeholders, not Puffin's learned motifs. Drop "
-                           "real PWMs into data/puffin_motifs.npz to replace "
-                           "them."),
+            "provenance": (
+                "Derived from the trained Puffin checkpoint: each PWM is a "
+                "learned conv filter trimmed to its informative core and put "
+                "in canonical orientation, and each preferred position is read "
+                "off the model's own deconv kernel. Nothing here is "
+                "hand-written. Re-generate with backend/extract_puffin_motifs.py."
+                if all(getattr(lib[m], "source", "") == "puffin" for m in library_order())
+                else "Consensus strings and PWMs are hand-written placeholders, "
+                     "not Puffin's learned motifs. Run "
+                     "backend/extract_puffin_motifs.py against a checkpoint to "
+                     "replace them."),
+            "library_source": ("puffin"
+                               if all(getattr(lib[m], "source", "") == "puffin"
+                                      for m in library_order()) else "placeholder"),
         }
 
     if path == "/api/models":
@@ -284,7 +361,8 @@ def route(path: str, body: dict, query: dict) -> dict:
             tss_index=body.get("tss_index"),
             gc=float(body.get("gc", 0.45)),
             cpg_oe=float(body.get("cpg_oe", 0.25)),
-            seed=body.get("seed"))
+            seed=body.get("seed"),
+            scrub_celltype_elements=bool(body.get("scrub_celltype_elements", True)))
         bg["hash"] = sequence_hash(bg["sequence"])
         return bg
 
@@ -316,6 +394,30 @@ def route(path: str, body: dict, query: dict) -> dict:
         if body.get("async"):
             return {"job_id": start_job(fn, *args, **kwargs)}
         return fn(*args, progress=None, **kwargs)
+
+    if path == "/api/mode1/attribution":
+        bgs = _backgrounds_from(body)
+        kwargs = dict(
+            placements=body.get("placements") or [],
+            model=body.get("celltype_model") or adapters.DEFAULT_CELLTYPE_MODEL,
+            cell_types=body.get("cell_types"),
+            target=body.get("target_cell_type"),
+            window=tuple(body.get("attribution_window") or (-300, 100)),
+            patch=int(body.get("patch", 12)),
+            stride=int(body.get("stride", 6)),
+            n_shuffles=int(body.get("n_shuffles", 3)),
+            perturbation=body.get("perturbation", "dinuc_shuffle"),
+            activity_window=tuple(body.get("activity_window") or (-200, 200)),
+            activity_method=body.get("activity_method", "mean"),
+            predict_window=_win(body))
+        if body.get("async", True):
+            return {"job_id": start_job(experiments.specificity_attribution,
+                                        bgs[0], **kwargs)}
+        return experiments.specificity_attribution(bgs[0], progress=None, **kwargs)
+
+    if path == "/api/agreement":
+        return _evaluate({**body, "include_celltype": True})["agreement"] or {
+            "error": "not enough models produced a profile"}
 
     # --- mode 2 ------------------------------------------------------------
     if path == "/api/mode2/pair":
@@ -517,7 +619,12 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def _json(self, obj, code: int = 200):
-        self._send(code, json.dumps(obj, cls=JSONEncoder).encode(),
+        # NaN and Infinity are not valid JSON, and json.dumps emits them as
+        # bare tokens that every browser parser rejects. Masked-out
+        # predictions are legitimately NaN, so they are converted to null,
+        # which the client already treats as "no value here".
+        self._send(code, json.dumps(json_safe(obj), cls=JSONEncoder,
+                                    allow_nan=False).encode(),
                    "application/json; charset=utf-8")
 
     def _error(self, code: int, msg: str, detail: str = ""):

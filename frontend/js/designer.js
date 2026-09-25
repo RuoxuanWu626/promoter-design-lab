@@ -8,23 +8,35 @@ const Designer = (() => {
   let pending = false;
 
   /* ================= palette ================= */
-  function renderPalette() {
-    const box = $('#palette');
-    clear(box);
-    const items = State.motifs.concat(State.extraElements);
-    for (const m of items) {
-      const chip = h('div', {
-        class: 'chip', draggable: 'true', title: m.notes || '',
-        style: { borderLeftColor: m.color || '#888' },
-        onclick: () => { State.addPlacement(m.id); changed(); },
-        ondragstart: (ev) => {
-          ev.dataTransfer.setData('text/plain', m.id);
-          ev.dataTransfer.effectAllowed = 'copy';
-        },
+  function chipFor(m) {
+    const tip = [m.notes, m.consensus ? 'consensus ' + m.consensus : null,
+                 m.typical_offset !== undefined ? 'prefers ' + (m.typical_offset > 0 ? '+' : '') + m.typical_offset + ' bp' : null]
+      .filter(Boolean).join('\n');
+    return h('div', {
+      class: 'chip', draggable: 'true', title: tip,
+      style: { borderLeftColor: m.color || '#888' },
+      onclick: () => { State.addPlacement(m.id); changed(); },
+      ondragstart: (ev) => {
+        ev.dataTransfer.setData('text/plain', m.id);
+        ev.dataTransfer.effectAllowed = 'copy';
       },
-        h('span', { text: m.name }),
-        m.consensus ? h('span', { class: 'cons', text: m.consensus }) : null);
-      box.appendChild(chip);
+    },
+      h('span', { text: m.name }),
+      m.consensus ? h('span', { class: 'cons',
+        text: m.consensus.length > 14 ? m.consensus.slice(0, 13) + '…' : m.consensus }) : null);
+  }
+
+  function renderPalette() {
+    const groups = [
+      ['#palette', State.motifs],
+      ['#paletteCT', State.celltypeElements],
+      ['#paletteOther', State.extraElements],
+    ];
+    for (const [sel, items] of groups) {
+      const box = $(sel);
+      if (!box) continue;
+      clear(box);
+      for (const m of items) box.appendChild(chipFor(m));
     }
   }
 
@@ -81,7 +93,7 @@ const Designer = (() => {
             onclick: (e) => { e.stopPropagation(); State.duplicatePlacement(p.uid); changed(); },
           }),
           h('button', {
-            class: 'btn icon sm', title: 'remove', text: '×',
+            class: 'btn icon sm danger', title: 'delete this element', text: '✕',
             onclick: (e) => { e.stopPropagation(); State.removePlacement(p.uid); changed(); },
           }),
         ));
@@ -386,13 +398,16 @@ const Designer = (() => {
     try {
       const half = Math.max(50, Math.floor(State.design.background.length / 2) - 1);
       const win = Math.min(1000, half);
-      const res = await API.post('/api/evaluate',
-        State.designPayload({ window: [-win, win] }));
+      const res = await API.post('/api/evaluate', State.designPayload({
+        window: [-win, win],
+        agreement_transform: ($('#agTransform') || {}).value || 'log1p',
+      }));
       State.lastEvaluation = res;
       renderStats(res);
       renderProfiles(res);
       renderCellTypes(res);
       renderMetrics(res);
+      renderAgreement(res);
       renderSeqBox(res);
       drawTrack();
     } catch (e) {
@@ -428,9 +443,11 @@ const Designer = (() => {
         h('div', { class: 'lab', text: lab }),
         h('div', { class: 'num ' + cls, text: val })));
     }
+    const scrubbed = res.background.scrubbed_celltype_sites;
     $('#bgStats').textContent =
       `GC ${fmtNum(res.background.stats.gc, 3)} · CpG o/e ${fmtNum(res.background.stats.cpg_oe, 3)} · ` +
-      `construct GC ${fmtNum(res.construct.stats.gc, 3)} · hash ${res.sequence_hash}`;
+      `construct GC ${fmtNum(res.construct.stats.gc, 3)} · hash ${res.sequence_hash}` +
+      (scrubbed ? ` · ${scrubbed} chance lineage site(s) scrubbed` : '');
   }
 
   function renderProfiles(res) {
@@ -453,6 +470,10 @@ const Designer = (() => {
                       style: { fontSize: '9px', padding: '1px 6px' },
                       text: pred.is_mock ? 'mock' : 'real' })),
         h('p', { class: 'plot-sub', text: `y: ${pred.scale}` }),
+        (pred.meta && pred.meta.padding_note)
+          ? h('div', { class: 'note warn', style: { margin: '0 0 8px' } },
+              h('strong', { text: '⚠ context ' }), pred.meta.padding_note)
+          : null,
         wrap));
       wrap.appendChild(canvas);
 
@@ -534,6 +555,61 @@ const Designer = (() => {
       `flipped where lower is better. Score = Σ weight × normalised.` }));
   }
 
+  const ROLE_LABEL = { simple: 'simple', deep: 'deep', profile: 'profile' };
+
+  function renderAgreement(res) {
+    const box = $('#agreementTable');
+    const canvas = $('#agScatter');
+    if (!box) return;
+    clear(box);
+    const ag = res.agreement;
+    if (!ag || ag.error) {
+      box.appendChild(h('div', { class: 'hint', text: (ag && ag.error) || 'needs at least two models' }));
+      Plot.setup(canvas, 30);
+      return;
+    }
+
+    // Lead with the simple-vs-deep pair, which is the comparison that matters.
+    const pairs = ag.pairs.slice().sort((a, b) => {
+      const key = (p) => (p.a_role === 'simple' && p.b_role === 'deep') ||
+                         (p.a_role === 'deep' && p.b_role === 'simple') ? 0 : 1;
+      return key(a) - key(b);
+    });
+
+    box.appendChild(h('table', { class: 'data' },
+      h('thead', {}, h('tr', {},
+        h('th', { text: 'model A' }), h('th', { text: 'model B' }),
+        h('th', { class: 'num', text: 'Pearson r' }),
+        h('th', { class: 'num', text: 'Spearman ρ' }),
+        h('th', { class: 'num', text: 'n' }))),
+      h('tbody', {}, ...pairs.map(p => {
+        const cross = (p.a_role === 'simple' && p.b_role === 'deep') ||
+                      (p.a_role === 'deep' && p.b_role === 'simple');
+        return h('tr', { class: cross ? 'hl' : '' },
+          h('td', {}, p.a_label,
+            p.a_role ? h('span', { class: 'badge', style: { marginLeft: '5px', fontSize: '9px', padding: '1px 5px', color: 'var(--fg-faint)' }, text: ROLE_LABEL[p.a_role] || p.a_role }) : null),
+          h('td', {}, p.b_label,
+            p.b_role ? h('span', { class: 'badge', style: { marginLeft: '5px', fontSize: '9px', padding: '1px 5px', color: 'var(--fg-faint)' }, text: ROLE_LABEL[p.b_role] || p.b_role }) : null),
+          h('td', { class: 'num', style: { color: Math.abs(p.pearson_r) > 0.7 ? 'var(--accent)' : Math.abs(p.pearson_r) > 0.4 ? 'var(--warn)' : 'var(--fg-dim)' }, text: fmtNum(p.pearson_r, 3) }),
+          h('td', { class: 'num', text: fmtNum(p.spearman_r, 3) }),
+          h('td', { class: 'num', text: p.n_positions }));
+      }))));
+    box.appendChild(h('div', { class: 'hint', text: ag.note }));
+
+    // Scatter of the leading pair.
+    const lead = pairs[0];
+    const A = ag.series.find(s2 => s2.name === lead.a);
+    const B = ag.series.find(s2 => s2.name === lead.b);
+    if (!A || !B) { Plot.setup(canvas, 30); return; }
+    Plot.managed(canvas, () => Plot.scatter(canvas, {
+      height: 210,
+      x: A.values, y: B.values,
+      xlabel: A.label, ylabel: B.label,
+      title: `r = ${fmtNum(lead.pearson_r, 3)}`,
+      color: '#4dd4ac',
+    }));
+  }
+
   function renderSeqBox(res) {
     const box = $('#seqBox');
     const seq = res.sequence;
@@ -586,13 +662,27 @@ const Designer = (() => {
     bind('#bgGC', 'gc', parseFloat, '#bgGCv');
     bind('#bgCpG', 'cpg_oe', parseFloat, '#bgCpGv');
     bind('#bgSeed', 'seed', v => parseInt(v || '0', 10));
+    const scrubBox = $('#bgScrub');
+    scrubBox.checked = !!bg.scrub;
+    scrubBox.addEventListener('change', () => { bg.scrub = scrubBox.checked; changed(); });
 
     $('#btnNewBg').onclick = () => {
       bg.seed = Math.floor(Math.random() * 1e6);
       $('#bgSeed').value = bg.seed; changed();
     };
     $('#btnRerollBg').onclick = $('#btnNewBg').onclick;
-    $('#btnClearEls').onclick = () => { State.design.placements = []; State.design.selected = null; changed(); };
+    $('#btnClearEls').onclick = () => {
+      if (!State.design.placements.length) return;
+      if (!confirm(`Delete all ${State.design.placements.length} placed elements?`)) return;
+      State.design.placements = [];
+      State.design.selected = null;
+      changed();
+    };
+    $('#btnDeleteSel').onclick = () => {
+      if (!State.design.selected) return toast('select an element on the track first', true);
+      State.removePlacement(State.design.selected);
+      changed();
+    };
     $('#btnSnapTypical').onclick = () => {
       for (const p of State.design.placements) {
         const m = State.motifById[p.element_id];
@@ -617,6 +707,9 @@ const Designer = (() => {
       syncZoomUI(); drawTrack();
       if (State.lastEvaluation) renderProfiles(State.lastEvaluation);
     };
+
+    const agSel = $('#agTransform');
+    if (agSel) agSel.addEventListener('change', scheduleEvaluate);
 
     $('#targetCT').addEventListener('change', (e) => {
       State.design.targetCellType = e.target.value || null;

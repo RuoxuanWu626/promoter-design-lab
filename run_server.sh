@@ -12,10 +12,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PARTITION="tier1q"
 TIME="12:00:00"
-CPUS=2
-MEM="6G"
+CPUS=8
+MEM="16G"
 PORT="${PDG_PORT:-8765}"
-PYTHON="${PDG_PYTHON:-python3}"
+# Default to the env that has torch, so the real Puffin checkpoint loads.
+# Falls back to plain python3, where only the mock adapters are available.
+TORCH_PY=/gpfs/data/zhou-lab/rxwu/settings/miniforge3/envs/alphagenome/bin/python
+PYTHON="${PDG_PYTHON:-$([ -x "$TORCH_PY" ] && echo "$TORCH_PY" || echo python3)}"
 JOBNAME="promoter-lab"
 LOCAL=0
 
@@ -55,6 +58,9 @@ cat > "$SBATCH" <<EOF
 echo "node: \$(hostname)"
 echo "port: $PORT"
 cd "$ROOT/backend"
+# Puffin's 601-wide deconvolutions are the bulk of the cost; give them the
+# cores the job actually reserved.
+export OMP_NUM_THREADS=$CPUS MKL_NUM_THREADS=$CPUS
 exec $PYTHON app.py --port $PORT --host 0.0.0.0 --open-port-scan
 EOF
 

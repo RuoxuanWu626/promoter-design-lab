@@ -19,21 +19,41 @@ from adapters.base import (
 )
 from adapters.mock_puffin import MockPuffin, MockPuffinD, MockPuffinAdditiveOnly
 from adapters.mock_alphagenome import MockAlphaGenome
-from adapters.real_puffin import RealPuffin, RealPuffinD
+from adapters.real_puffin import RealPuffin, RealPuffinProCap
 from adapters.real_alphagenome import RealAlphaGenome
 
 _PROFILE: "OrderedDict[str, ProfileAdapter]" = OrderedDict()
 _CELLTYPE: "OrderedDict[str, CellTypeAdapter]" = OrderedDict()
 
-for _a in (MockPuffin(), MockPuffinD(), MockPuffinAdditiveOnly(),
-           RealPuffin(), RealPuffinD()):
+# Real models first: they are what the app should use when they load. The mock
+# adapters stay registered because they are useful controls (MockPuffin is
+# additive by construction, so its Mode 2 residual measures the sequence
+# artefact) and because they keep the app usable with no checkpoint present.
+for _a in (RealPuffin(), RealPuffinProCap(),
+           MockPuffin(), MockPuffinD(), MockPuffinAdditiveOnly()):
     _PROFILE[_a.name] = _a
 
-for _c in (MockAlphaGenome(), RealAlphaGenome()):
+for _c in (RealAlphaGenome(), MockAlphaGenome()):
     _CELLTYPE[_c.name] = _c
 
-DEFAULT_PROFILE_MODELS = ["mock_puffin", "mock_puffind"]
-DEFAULT_CELLTYPE_MODEL = "mock_alphagenome"
+
+def _first_available(adapters_map, preferred: list[str]) -> str:
+    for name in preferred:
+        a = adapters_map.get(name)
+        if a is not None and a.available()[0]:
+            return name
+    for name, a in adapters_map.items():
+        if a.available()[0]:
+            return name
+    return next(iter(adapters_map))
+
+
+# Resolved once at import so the UI's defaults follow what actually loaded.
+DEFAULT_PROFILE_MODELS = [_first_available(_PROFILE, ["puffin", "mock_puffin"])]
+if DEFAULT_PROFILE_MODELS[0] == "puffin" and _PROFILE["mock_puffin"].available()[0]:
+    # Keep the additive control alongside the real model in Mode 2.
+    DEFAULT_PROFILE_MODELS.append("mock_puffin")
+DEFAULT_CELLTYPE_MODEL = _first_available(_CELLTYPE, ["alphagenome", "mock_alphagenome"])
 
 
 def get_profile_adapter(name: str) -> ProfileAdapter:

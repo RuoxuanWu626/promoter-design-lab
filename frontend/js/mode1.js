@@ -317,6 +317,151 @@ const Mode1 = (() => {
     download(`mode1_scan_${stamp()}.csv`, toCSV(rows), 'text/csv');
   }
 
+  /* ================= attribution ================= */
+  function attrCount() {
+    const a = parseInt($('#m1AttrFrom').value, 10), b = parseInt($('#m1AttrTo').value, 10);
+    const st = Math.max(1, parseInt($('#m1AttrStride').value, 10));
+    const patch = Math.max(2, parseInt($('#m1AttrPatch').value, 10));
+    const reps = Math.max(1, parseInt($('#m1AttrShuffles').value, 10));
+    const n = Math.max(0, Math.floor((Math.abs(b - a) - patch) / st) + 1);
+    $('#m1AttrCount').textContent = `${n} patches x ${reps} repeats = ${n * reps} predictions`;
+  }
+
+  async function runAttribution() {
+    const btn = $('#m1RunAttr');
+    btn.disabled = true;
+    const bar = $('#m1Progress'); bar.style.display = 'block';
+    const txt = $('#m1ProgressText');
+    try {
+      const body = Object.assign(State.designPayload(), {
+        celltype_model: $('#m1Model').value,
+        target_cell_type: $('#m1Target').value || null,
+        activity_method: $('#m1ActMethod').value,
+        activity_window: [parseInt($('#m1ActFrom').value, 10), parseInt($('#m1ActTo').value, 10)],
+        attribution_window: [parseInt($('#m1AttrFrom').value, 10), parseInt($('#m1AttrTo').value, 10)],
+        patch: parseInt($('#m1AttrPatch').value, 10),
+        stride: parseInt($('#m1AttrStride').value, 10),
+        n_shuffles: parseInt($('#m1AttrShuffles').value, 10),
+        perturbation: $('#m1AttrMode').value,
+      });
+      const res = await API.job('/api/mode1/attribution', body, (pg) => {
+        const pct = pg.total ? Math.round(100 * pg.done / pg.total) : 0;
+        bar.firstElementChild.style.width = pct + '%';
+        txt.textContent = `${pg.stage || ''} ${pg.done}/${pg.total} ${pg.detail || ''}`;
+      });
+      State.lastAttribution = res;
+      renderAttribution(res);
+      toast('attribution done');
+    } catch (e) {
+      fail(e);
+    } finally {
+      btn.disabled = false; bar.style.display = 'none'; txt.textContent = '';
+    }
+  }
+
+  function renderAttribution(res) {
+    const box = $('#m1Content');
+    clear(box);
+
+    const a = res.summary.activity, t = res.summary.specificity;
+    const pos = res.positions;
+
+    box.appendChild(h('div', { class: 'note mock' },
+      h('strong', { text: 'What encodes cell-type specificity?' }),
+      ' Each patch of sequence is disrupted (', res.perturbation.replace('_', ' '),
+      `, ${res.patch} bp, ${res.n_shuffles}x) and the panel re-predicted. `,
+      'Attribution is original minus perturbed, so positive means the patch was contributing. ',
+      'Activity and specificity are scored separately because they are different questions.'));
+
+    box.appendChild(h('div', { class: 'stat-strip' },
+      stat('Core-promoter share of ACTIVITY', (100 * a.fraction_on_core_promoter).toFixed(0) + '%', 'good'),
+      stat('Core-promoter share of SPECIFICITY', (100 * t.fraction_on_core_promoter).toFixed(0) + '%', ''),
+      stat('Lineage-site share of SPECIFICITY', (100 * t.fraction_on_celltype_elements).toFixed(0) + '%', 'good'),
+      stat('Lineage-site share of ACTIVITY', (100 * a.fraction_on_celltype_elements).toFixed(0) + '%', ''),
+      stat('Patches', `${res.patches_total}`, '')));
+
+    /* the headline comparison as a small grouped bar chart */
+    const rows = [
+      ['core promoter motifs', a.fraction_on_core_promoter, t.fraction_on_core_promoter],
+      ['lineage TF sites', a.fraction_on_celltype_elements, t.fraction_on_celltype_elements],
+      ['elsewhere', a.fraction_elsewhere, t.fraction_elsewhere],
+    ];
+    box.appendChild(h('div', { class: 'panel' },
+      h('h3', {}, 'Where each kind of attribution falls'),
+      h('table', { class: 'data' },
+        h('thead', {}, h('tr', {},
+          h('th', { text: '' }),
+          h('th', { class: 'num', text: 'ACTIVITY (how much)' }),
+          h('th', { class: 'num', text: 'SPECIFICITY (which cell type)' }))),
+        h('tbody', {}, ...rows.map(([lab, av, tv]) => h('tr', {},
+          h('td', { text: lab }),
+          h('td', { class: 'num', style: { color: av > tv ? 'var(--accent)' : 'var(--fg-dim)' },
+                    text: (100 * av).toFixed(1) + '%' }),
+          h('td', { class: 'num', style: { color: tv > av ? 'var(--accent)' : 'var(--fg-dim)' },
+                    text: (100 * tv).toFixed(1) + '%' }))))),
+      h('div', { class: 'hint', text:
+        `Core promoter motifs cover ${(100 * res.summary.patch_fraction_on_core_promoter).toFixed(0)}% of patches, ` +
+        `lineage sites ${(100 * res.summary.patch_fraction_on_celltype_elements).toFixed(0)}%. ` +
+        'Compare each column against those coverage figures, not against 50%.' })));
+
+    /* attribution tracks */
+    const wrap = h('div', { class: 'plotwrap' });
+    const canvas = h('canvas');
+    wrap.appendChild(canvas);
+    box.appendChild(h('div', { class: 'panel' },
+      h('div', { class: 'plot-title', text: 'Attribution along the promoter' }),
+      h('p', { class: 'plot-sub', text:
+        'Green = contribution to activity. Amber = contribution to tau. Shaded bands mark ' +
+        'placed elements: solid for core promoter motifs, hatched for lineage TF sites.' }),
+      wrap));
+
+    const bands = (res.motif_footprints || []).map(f => ({
+      from: f.start, to: f.end,
+      color: f.kind === 'celltype_element' ? 'rgba(214,69,80,.16)' : 'rgba(88,166,255,.13)',
+    }));
+
+    Plot.managed(canvas, () => Plot.line(canvas, {
+      height: 230, legendRight: true, ySymmetric: true,
+      xlabel: 'position relative to TSS (bp)', ylabel: 'attribution',
+      vlines: [{ x: 0, label: 'TSS' }],
+      bands,
+      series: [
+        { x: pos, y: res.attribution_activity, color: '#4dd4ac', label: 'activity', width: 2 },
+        { x: pos, y: res.attribution_specificity, color: '#f0a13a', label: 'tau (specificity)', width: 2 },
+      ],
+    }));
+
+    box.appendChild(h('div', { class: 'legend' },
+      ...(res.motif_footprints || []).map(f => h('div', { class: 'item' },
+        h('span', { class: 'sw', style: {
+          background: f.kind === 'celltype_element' ? 'rgba(214,69,80,.6)' : 'rgba(88,166,255,.6)',
+          height: '8px', width: '12px' } }),
+        h('span', { text: `${f.name} (${f.start >= 0 ? '+' : ''}${f.start})` })))));
+
+    /* per-cell-type attribution heatmap */
+    const hm = h('div', { class: 'plotwrap' });
+    const hc = h('canvas');
+    hm.appendChild(hc);
+    box.appendChild(h('div', { class: 'panel' },
+      h('div', { class: 'plot-title', text: 'Attribution per cell type' }),
+      h('p', { class: 'plot-sub', text:
+        'Red = disrupting this patch lowered that cell type. A patch that is red for one row ' +
+        'and flat for the rest is a specificity element; a patch red across every row changes ' +
+        'the level without changing the pattern.' }),
+      hm));
+    const mat = res.cell_types.map((c, i) => res.attribution_per_cell_type.map(r => r[i]));
+    Plot.managed(hc, () => Plot.heatmap(hc, {
+      matrix: mat, rowLabels: res.cell_types.map(c => c.split(' (')[0]),
+      xticksFrom: pos, scheme: 'diverging', annotate: false,
+      plotHeight: Math.max(150, res.cell_types.length * 19),
+      xlabel: 'position relative to TSS (bp)', valueLabel: 'attribution',
+    }));
+
+    box.appendChild(h('div', { class: 'note warn' },
+      h('strong', { text: 'Reading this honestly' }),
+      h('ul', {}, ...(res.caveats || []).map(c => h('li', { text: c })))));
+  }
+
   function init() {
     ['#m1From', '#m1To', '#m1Step', '#m1NBg'].forEach(s =>
       $(s).addEventListener('input', updateCount));
@@ -326,6 +471,10 @@ const Mode1 = (() => {
       $('#m1SegWrap').style.display = v === 'cpg_segment' ? '' : 'none';
     });
     $('#m1Run').onclick = run;
+    $('#m1RunAttr').onclick = runAttribution;
+    ['#m1AttrFrom', '#m1AttrTo', '#m1AttrPatch', '#m1AttrStride', '#m1AttrShuffles']
+      .forEach(sel => $(sel).addEventListener('input', attrCount));
+    attrCount();
     $('#m1ExCsv').onclick = exportCsv;
     $('#m1ExJson').onclick = () => {
       if (!State.lastMode1) return toast('run a scan first', true);
@@ -342,5 +491,5 @@ const Mode1 = (() => {
     updateCount();
   }
 
-  return { init, run, render, updateCount };
+  return { init, run, render, updateCount, runAttribution, renderAttribution };
 })();

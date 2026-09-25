@@ -485,6 +485,74 @@ const Plot = (() => {
     }
   }
 
+  /* =====================================================================
+   * Scatter, with a least-squares line. Used for model-vs-model agreement.
+   * ===================================================================== */
+  function scatter(canvas, cfg) {
+    const height = cfg.height || 220;
+    const { ctx, w, h } = setup(canvas, height);
+    const pad = Object.assign({ l: 56, r: 14, t: 18, b: 40 }, cfg.pad || {});
+    const PW = Math.max(10, w - pad.l - pad.r);
+    const PH = Math.max(10, h - pad.t - pad.b);
+
+    const xs = [], ys = [];
+    const n = Math.min(cfg.x.length, cfg.y.length);
+    for (let i = 0; i < n; i++) {
+      if (ok(cfg.x[i]) && ok(cfg.y[i])) { xs.push(cfg.x[i]); ys.push(cfg.y[i]); }
+    }
+    if (!xs.length) return;
+
+    let [x0, x1] = extent([xs]);
+    let [y0, y1] = extent([ys]);
+    const xp = (x1 - x0) * 0.05, yp = (y1 - y0) * 0.05;
+    x0 -= xp; x1 += xp; y0 -= yp; y1 += yp;
+    const X = v => pad.l + (v - x0) / (x1 - x0) * PW;
+    const Y = v => pad.t + PH - (v - y0) / (y1 - y0) * PH;
+
+    ctx.strokeStyle = CSS('--line-soft');
+    const xt = ticks(x0, x1, 5), yt = ticks(y0, y1, 5);
+    for (const t of yt) { const y = Y(t); ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(pad.l + PW, y); ctx.stroke(); }
+    for (const t of xt) { const x = X(t); ctx.beginPath(); ctx.moveTo(x, pad.t); ctx.lineTo(x, pad.t + PH); ctx.stroke(); }
+
+    ctx.fillStyle = (cfg.color || PALETTE[0]) + 'aa';
+    const r = xs.length > 600 ? 1.2 : xs.length > 200 ? 1.8 : 2.4;
+    for (let i = 0; i < xs.length; i++) {
+      ctx.beginPath(); ctx.arc(X(xs[i]), Y(ys[i]), r, 0, 7); ctx.fill();
+    }
+
+    /* least-squares fit */
+    const mx = xs.reduce((a, b) => a + b, 0) / xs.length;
+    const my = ys.reduce((a, b) => a + b, 0) / ys.length;
+    let sxy = 0, sxx = 0;
+    for (let i = 0; i < xs.length; i++) { sxy += (xs[i] - mx) * (ys[i] - my); sxx += (xs[i] - mx) ** 2; }
+    if (sxx > 0) {
+      const b1 = sxy / sxx, b0 = my - b1 * mx;
+      ctx.strokeStyle = CSS('--warn'); ctx.lineWidth = 1.4; ctx.setLineDash([5, 3]);
+      ctx.beginPath(); ctx.moveTo(X(x0), Y(b0 + b1 * x0)); ctx.lineTo(X(x1), Y(b0 + b1 * x1)); ctx.stroke();
+      ctx.setLineDash([]); ctx.lineWidth = 1;
+    }
+
+    ctx.strokeStyle = CSS('--line');
+    ctx.beginPath(); ctx.moveTo(pad.l, pad.t); ctx.lineTo(pad.l, pad.t + PH);
+    ctx.lineTo(pad.l + PW, pad.t + PH); ctx.stroke();
+
+    ctx.fillStyle = CSS('--fg-faint'); ctx.font = '9.5px ' + CSS('--mono');
+    ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+    for (const t of yt) { if (t >= y0 && t <= y1) ctx.fillText(fmt(t), pad.l - 6, Y(t)); }
+    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    for (const t of xt) { if (t >= x0 && t <= x1) ctx.fillText(fmt(t), X(t), pad.t + PH + 5); }
+
+    ctx.fillStyle = CSS('--fg-dim'); ctx.font = '10px ' + CSS('--sans');
+    if (cfg.xlabel) { ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+                      ctx.fillText(String(cfg.xlabel).slice(0, 46), pad.l + PW / 2, h - 1); }
+    if (cfg.ylabel) { ctx.save(); ctx.translate(12, pad.t + PH / 2); ctx.rotate(-Math.PI / 2);
+                      ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+                      ctx.fillText(String(cfg.ylabel).slice(0, 34), 0, 0); ctx.restore(); }
+    if (cfg.title) { ctx.fillStyle = CSS('--accent'); ctx.font = 'bold 11px ' + CSS('--mono');
+                     ctx.textAlign = 'right'; ctx.textBaseline = 'top';
+                     ctx.fillText(cfg.title, pad.l + PW, 2); }
+  }
+
   /* ---------- re-render on resize ---------- */
   const _redraw = new Map();
   function managed(canvas, fn) {
@@ -508,6 +576,6 @@ const Plot = (() => {
     }
   }
 
-  return { line, heatmap, bars, setup, ticks, fmt, extent, ok, colorFor, diverging,
+  return { line, heatmap, bars, scatter, setup, ticks, fmt, extent, ok, colorFor, diverging,
            PALETTE, managed, redrawVisible, CSS };
 })();

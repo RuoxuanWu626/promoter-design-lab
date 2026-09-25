@@ -60,7 +60,27 @@ until you have checked against the checkpoint; leave it until you have.
 indices, and the bin size belongs in `meta`. Mode 1's position scan will
 otherwise be read at a finer resolution than the model actually has.
 
-## Puffin / PuffinD checklist
+## Puffin — DONE
+
+`adapters/real_puffin.py` is implemented and is the default profile model.
+Architecture in `models/puffin_arch.py`, weights from
+`/gpfs/data/zhou-lab/rxwu/puffin_species/human/puffin.pth` (override with
+`$PUFFIN_WEIGHTS`). It runs on CPU.
+
+Two things it got right that are easy to get wrong, and that any replacement
+must keep:
+
+* **Context, not padding.** Output is valid only 325 bp inside the input.
+  Positions without full context are returned as NaN and travel as `null`, so
+  the plot gaps. Zero-padding them instead produces an edge artefact far larger
+  than any real signal, and it silently poisons every metric downstream
+  (argmax lands on the artefact).
+* **`deconv` is a cross-correlation.** An activation at *p* drives output at
+  *p − argmax(kernel)*, not *p + argmax*. Getting the sign backwards puts every
+  motif on the wrong side of the TSS; the check is that TATA must come out at
+  −31.
+
+## Older Puffin checkpoint variants
 
 1. **Input length.** Puffin expects a fixed receptive field. Either pad/crop the
    construct around the TSS or predict on a sliding window and stitch. Record
@@ -74,32 +94,76 @@ otherwise be read at a finer resolution than the model actually has.
 
 Environment: `PUFFIN_REPO`, `PUFFIN_WEIGHTS`, `PUFFIND_WEIGHTS`.
 
-## AlphaGenome checklist
+## AlphaGenome — what is known, and what blocks it
 
-The `alphagenome` env on this cluster already has the client library:
+This is the **local PyTorch port**, not the hosted API. No API key is involved.
 
 ```
-/gpfs/data/zhou-lab/rxwu/settings/miniforge3/envs/alphagenome/bin/python
+port     /gpfs/data/zhou-lab/rxwu/Puffin-drozofila/tests/alphagenome_torch
+weights  .../alphagenome_all_folds.pt          (1.7 GB)
+meta     /gpfs/data/zhou-lab/sharish/genomics/alphagenome_dataset/hg38/bp/
+         alphagenome_human_bp_stranded_cp100m_logp1.v3.meta.tsv
 ```
 
-Start the server with that interpreter and set `ALPHAGENOME_API_KEY`:
+Loading and inference, taken from the lab's own working benchmark
+(`opengenome/benchmark_alphagenome_human_published_cage_specificity.py`):
 
-```bash
-PDG_PYTHON=/gpfs/data/zhou-lab/rxwu/settings/miniforge3/envs/alphagenome/bin/python \
-  ./run_server.sh
+```python
+sys.path.insert(0, TORCH_DIR)
+from alphagenome.models import dna_model as dna_model_lib, dna_output
+from alphagenome_research.model.metadata import metadata as metadata_lib
+from alphagenome_torch import model as torch_model_lib
+
+organism = dna_model_lib.Organism.HOMO_SAPIENS
+md = metadata_lib.load(organism)
+model = torch_model_lib.AlphaGenomeTorch({organism: md})
+# all_folds ships some weights with a leading dim of 2; take [:1]
+model.load_state_dict(state, strict=True)
+valid = np.flatnonzero(~np.asarray(md.padding[dna_output.OutputType.CAGE]))  # 546
+
+raw, _ = model(x, torch.zeros(1, dtype=torch.long, device=dev), output_heads=("cage",))
+p1 = raw["cage"]["predictions_1bp"][0].index_select(-1, valid_t)   # (L, 546)
 ```
+
+546 CAGE tracks = 273 cell types x 2 strands; the meta TSV has `name` and
+`strand` columns to fold them into per-cell-type values.
+
+**The blocker is a CUDA driver mismatch, not the code.** The `alphagenome` env
+has `torch 2.12.0+cu130`; the A100 nodes (`gpuq`) run driver 570.124, which is
+CUDA 12.8, so `torch.cuda.is_available()` is False there. `gpuq_env` has a
+compatible `cu126` build but not the AlphaGenome packages. Any one of these
+fixes it:
+
+* a node with driver >= 580 (the H200 in `gpuq`, if free),
+* `alphagenome` + `alphagenome_research` installed into a `cu126`/`cu128` env,
+* the arm64 env on the GH200 nodes
+  (`miniforge3-arm64/envs/alphagenome-arm64`, partitions `ghq` / `pearsonq`),
+  which is what the lab's own AlphaGenome jobs use.
 
 1. **Enumerate tracks from the model's own output metadata**, not a hand-written
    list, and keep biosample name plus ontology id so results stay traceable.
-2. **Input length.** Pad the construct to a supported interval size, centred so
-   the designed TSS sits where you intend. Record the padding in `meta`.
+2. **Input length.** The model takes 2^20 = 1,048,576 bp. A 1-2 kb construct
+   has to be embedded in that context, centred so the designed TSS sits where
+   you intend, and the padding recorded in `meta`. What fills the rest is a
+   real experimental choice: neutral sequence, a fixed genomic locus, or the
+   construct's own background repeated all give different answers, and the one
+   you pick belongs in the exported settings.
 3. **Scale.** Record whether values are raw predicted counts or transformed.
    Tau is computed on a scalar per cell type; taking that scalar on the raw
    versus log scale gives different numbers, so state which.
-4. **Quota and latency.** A Mode 1 scan is one request per offset — a default
-   scan is 81 offsets × replicate backgrounds. Batch where the API allows,
-   cache by sequence hash (`adapters.cache_key` / `adapters.cached` already do
-   this), and warn before launching a large scan.
+4. **Cost.** A Mode 1 position scan is one forward pass per offset (a default
+   scan is 81 offsets x replicate backgrounds), and Mode 1's attribution panel
+   is one per patch. At 1 Mb per pass that is the dominant cost in the whole
+   app. Batch, cache by sequence hash (`adapters.cache_key` / `adapters.cached`
+   already do this), and consider running attribution as a submitted job rather
+   than interactively.
+
+5. **Specificity comes from the lineage sites.** The mock cell-type adapter
+   weights Puffin's core promoter motifs almost identically across cell types
+   and puts the cell-type differences on the separate lineage TF library,
+   because that is where promoter cell-type specificity actually lives. When
+   the real model is wired up, Mode 1's attribution panel is the direct check
+   on whether it agrees.
 
 ## Replacing the placeholder motifs
 

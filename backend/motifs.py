@@ -18,6 +18,7 @@ source changes nothing else.
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field, asdict
 
@@ -83,6 +84,24 @@ class Motif:
     mock_width: float = 12.0         # gaussian sigma of the contributed peak, bp
     mock_broad_fraction: float = 0.0  # share of the effect that is broad, not sharp
     mock_strand_asymmetry: float = 1.0  # multiplier applied on the minus strand
+
+    # "core_promoter" for Puffin's ten filters, "celltype_element" for the
+    # lineage TF sites in celltype_elements.py. They are kept apart because
+    # they answer different questions: core promoter motifs set how much
+    # initiation there is, lineage sites set which cell types show it.
+    kind: str = "core_promoter"
+    factors: str = ""
+    activates: list = field(default_factory=list)
+    represses: list = field(default_factory=list)
+
+    # Filled in when a real checkpoint has been extracted (see
+    # extract_puffin_motifs.py); None means the entry is still a placeholder.
+    source: str = "placeholder"
+    information_bits: float | None = None
+    effect_profile: list | None = None
+    effect_offsets: list | None = None
+    filter_index: int | None = None
+    filter_strand: str | None = None
 
     pwm: np.ndarray | None = field(default=None, repr=False)
 
@@ -234,6 +253,11 @@ def get_library(path: str | None = None) -> dict[str, Motif]:
 
     lib = {m.id: m for m in _LIBRARY_SPEC}
 
+    # Imported here rather than at module scope to avoid a circular import;
+    # celltype_elements builds Motif objects.
+    from celltype_elements import build_elements
+    lib.update(build_elements())
+
     if path is None:
         here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         path = os.path.join(here, "data", "puffin_motifs.npz")
@@ -246,15 +270,64 @@ def get_library(path: str | None = None) -> dict[str, Motif]:
                     if arr.shape[0] == 4:
                         motif.pwm = arr / arr.sum(axis=0, keepdims=True)
                         motif.consensus = motif.consensus_instance()
+                        motif.source = "puffin"
         except Exception as exc:  # pragma: no cover - diagnostics only
             print(f"[motifs] could not load {path}: {exc}")
+
+        # Metadata written alongside the PWMs by extract_puffin_motifs.py:
+        # real names, colours, and positions read off the model's own deconv
+        # kernels. These replace the hand-written placeholders, so nothing in
+        # the library is guessed once a checkpoint has been extracted.
+        meta_path = os.path.splitext(path)[0] + ".json"
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path) as fh:
+                    meta = json.load(fh)
+                for mid, m in (meta.get("motifs") or {}).items():
+                    motif = lib.get(mid)
+                    if motif is None:
+                        continue
+                    motif.name = m.get("puffin_name", motif.name)
+                    motif.color = m.get("color", motif.color)
+                    motif.typical_offset = int(m.get("typical_offset", motif.typical_offset))
+                    motif.mock_peak_shift = int(m.get("peak_shift", motif.mock_peak_shift))
+                    motif.information_bits = m.get("mean_information_bits")
+                    motif.effect_profile = m.get("effect_profile")
+                    motif.effect_offsets = m.get("effect_offsets")
+                    motif.filter_index = m.get("filter_index")
+                    motif.filter_strand = m.get("filter_strand")
+                    motif.source = "puffin"
+                    motif.notes = (
+                        f"Learned Puffin filter {m.get('filter_index')} "
+                        f"(strand {m.get('filter_strand')}), trimmed to its "
+                        f"informative core. Its preferred position "
+                        f"({motif.typical_offset:+d} bp) is read off the "
+                        f"model's deconv kernel, not assumed."
+                    )
+                _cache = lib
+                return lib
+            except Exception as exc:  # pragma: no cover - diagnostics only
+                print(f"[motifs] could not load {meta_path}: {exc}")
 
     _cache = lib
     return lib
 
 
 def library_order() -> list[str]:
+    """Puffin's ten core promoter motifs, in library order."""
     return [m.id for m in _LIBRARY_SPEC]
+
+
+def celltype_element_order() -> list[str]:
+    """The lineage TF sites, which are a separate library (see celltype_elements)."""
+    from celltype_elements import CELLTYPE_ELEMENT_IDS
+    return list(CELLTYPE_ELEMENT_IDS)
+
+
+def core_library() -> dict:
+    """Only the core promoter motifs."""
+    lib = get_library()
+    return {k: lib[k] for k in library_order() if k in lib}
 
 
 def pwm_log_odds(pwm: np.ndarray, background: np.ndarray | None = None) -> np.ndarray:

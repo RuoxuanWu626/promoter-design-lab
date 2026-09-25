@@ -36,7 +36,7 @@
         <div class="panel">
           <h3>Background sequence</h3>
           <div class="row"><label>Length</label>
-            <input type="number" id="bgLength" value="1001" min="200" max="8000" step="100"></div>
+            <input type="number" id="bgLength" value="2001" min="200" max="8000" step="100"></div>
           <div class="row"><label>GC content</label>
             <input type="range" id="bgGC" min="0.25" max="0.75" step="0.01" value="0.45">
             <span class="val" id="bgGCv">0.45</span></div>
@@ -45,6 +45,14 @@
             <span class="val" id="bgCpGv">0.25</span></div>
           <div class="row"><label>Seed</label>
             <input type="number" id="bgSeed" value="42"></div>
+          <div class="row" style="align-items:flex-start">
+            <input type="checkbox" id="bgScrub" checked style="flex:0 0 auto;width:auto;margin-top:2px">
+            <label for="bgScrub" style="flex:1;cursor:pointer;color:var(--fg-dim)">
+              Clean canvas <span class="hint" style="display:block;margin:0">Shuffle chance
+              lineage TF sites out of the background so designed ones are visible.
+              Composition is preserved. Uncheck to design against truly random sequence.</span>
+            </label>
+          </div>
           <div class="btnrow">
             <button class="btn sm" id="btnNewBg">New background</button>
             <button class="btn sm" id="btnRerollBg">Re-roll seed</button>
@@ -53,21 +61,39 @@
         </div>
 
         <div class="panel">
-          <h3>Motif library <span style="text-transform:none;letter-spacing:0">(click or drag onto the track)</span></h3>
+          <h3>Core promoter motifs <span style="text-transform:none;letter-spacing:0">(Puffin's 10)</span></h3>
           <div class="palette" id="palette"></div>
-          <div class="hint">Puffin's 10 motifs, plus a CpG-rich segment and a custom sequence.
-            Placing an element <strong>overwrites</strong> bases, so length never changes.</div>
+          <div class="hint">The ten filters Puffin actually learned. These mostly set
+            <strong>how much</strong> initiation there is and where it starts.</div>
+        </div>
+
+        <div class="panel">
+          <h3>Cell-type elements <span style="text-transform:none;letter-spacing:0">(lineage TF sites)</span></h3>
+          <div class="palette" id="paletteCT"></div>
+          <div class="hint">Binding sites for lineage transcription factors. These are
+            <strong>not</strong> core promoter motifs — they are what makes a promoter
+            <strong>cell-type specific</strong>. Mode 1's attribution panel separates the two.</div>
+        </div>
+
+        <div class="panel">
+          <h3>Other elements</h3>
+          <div class="palette" id="paletteOther"></div>
+          <div class="hint">Placing an element <strong>overwrites</strong> bases, so the
+            construct length never changes.</div>
         </div>
 
         <div class="panel">
           <h3>Placed elements <span id="elCount" style="color:var(--fg-dim)"></span></h3>
           <div class="elist" id="elist"></div>
           <div class="btnrow" style="margin-top:8px">
-            <button class="btn sm" id="btnClearEls">Clear all</button>
-            <button class="btn sm" id="btnSnapTypical">Snap to typical positions</button>
+            <button class="btn sm" id="btnDeleteSel">Delete selected</button>
+            <button class="btn sm" id="btnClearEls">Delete all</button>
+            <button class="btn sm" id="btnSnapTypical">Snap to preferred positions</button>
           </div>
-          <div class="hint">Drag boxes on the track, or edit positions here.
-            Keyboard: ← → nudge 1 bp, Shift+← → 10 bp, R reverse, D duplicate, Del remove.</div>
+          <div class="hint">Every element can be <strong>deleted</strong> with its ✕ button,
+            or by selecting it and pressing Delete. Drag boxes on the track, or edit positions
+            here. Keyboard: ← → nudge 1 bp, Shift+← → 10 bp, R reverse, D duplicate,
+            Del/Backspace delete.</div>
         </div>
 
         <div class="panel">
@@ -130,6 +156,22 @@
             <h3>Metrics &amp; weighted score</h3>
             <div id="metricsTable"></div>
           </div>
+        </div>
+
+        <div class="panel">
+          <h3>Model agreement <span style="text-transform:none;letter-spacing:0">(simple vs deep)</span></h3>
+          <div class="row" style="margin-bottom:8px">
+            <label>Compare on</label>
+            <select id="agTransform" style="max-width:220px">
+              <option value="log1p">common log1p scale</option>
+              <option value="none">raw model output</option>
+            </select>
+            <span class="hint" style="margin:0 0 0 8px">Pearson r is scale-invariant, but a
+              log output vs a linear one is not an affine relation — so both are brought to
+              one scale first.</span>
+          </div>
+          <div id="agreementTable"></div>
+          <div class="plotwrap"><canvas id="agScatter"></canvas></div>
         </div>
 
         <div class="panel">
@@ -205,6 +247,33 @@
 
         <div class="btnrow">
           <button class="btn primary" id="m1Run" style="flex:1">Run position scan</button>
+        </div>
+
+        <div class="panel" style="margin-top:11px">
+          <h3>Attribution: what encodes specificity?</h3>
+          <div class="hint" style="margin-bottom:7px">Disrupts the sequence patch by patch and
+            asks two separate questions: what drives <strong>activity</strong>, and what drives
+            <strong>tau</strong>. Core promoter motifs and lineage TF sites are scored separately.</div>
+          <div class="grid3">
+            <div><label class="hint">from</label><input type="number" id="m1AttrFrom" value="-300"></div>
+            <div><label class="hint">to</label><input type="number" id="m1AttrTo" value="100"></div>
+            <div><label class="hint">patch</label><input type="number" id="m1AttrPatch" value="12" min="2"></div>
+          </div>
+          <div class="grid3">
+            <div><label class="hint">stride</label><input type="number" id="m1AttrStride" value="6" min="1"></div>
+            <div><label class="hint">repeats</label><input type="number" id="m1AttrShuffles" value="3" min="1" max="10"></div>
+            <div><label class="hint">disrupt by</label>
+              <select id="m1AttrMode">
+                <option value="dinuc_shuffle">dinuc shuffle</option>
+                <option value="mono_shuffle">mono shuffle</option>
+                <option value="neutral">N (remove)</option>
+              </select></div>
+          </div>
+          <div class="hint" id="m1AttrCount" style="margin-top:4px">–</div>
+          <div class="btnrow" style="margin-top:7px">
+            <button class="btn primary" id="m1RunAttr" style="flex:1">Run attribution</button>
+          </div>
+          <div class="hint">Uses the construct from the <strong>Design</strong> tab.</div>
         </div>
         <div class="progress" id="m1Progress" style="margin-top:8px;display:none"><div style="width:0"></div></div>
         <div class="hint" id="m1ProgressText"></div>

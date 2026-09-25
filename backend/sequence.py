@@ -110,9 +110,75 @@ def _tune_cpg(chars: list[str], target_cpg: int, rng: np.random.Generator,
             chars[a], chars[b] = chars[b], chars[a]
 
 
+def scrub_motifs(seq: str, motif_ids: list[str], rng: np.random.Generator,
+                 occupancy: float = 0.5, max_rounds: int = 25) -> tuple[str, int]:
+    """Remove strong matches to ``motif_ids`` from a sequence.
+
+    Random sequence contains real transcription factor sites by chance -- a
+    2 kb background typically carries several. They are genuine as far as the
+    model is concerned and they drive cell-type specificity, which makes a
+    designed site impossible to see against them.
+
+    Scrubbing gives a blank canvas to design on. It is a deliberate departure
+    from random sequence, not a neutral default, so the caller records that it
+    happened.
+
+    Two things make this harder than it looks, and both are handled here:
+
+    * A dinucleotide-preserving shuffle of an 8-10 bp patch has very few valid
+      permutations and frequently returns the patch unchanged, so shuffling the
+      motif footprint alone does not remove it. The patch is widened before
+      shuffling, which gives the shuffle room to move.
+    * A shuffle can create a *new* match, so each attempt is verified and
+      retried, and the loop only stops when a full re-scan comes back clean.
+
+    Composition is preserved by the shuffle; only if repeated shuffles fail
+    does it fall back to redrawing the patch, which perturbs composition
+    locally.
+    """
+    from adapters.mock_common import motif_hits_by_motif, motif_occupancy
+    lib = get_library()
+    removed = 0
+    pad = 6
+
+    for _ in range(max_rounds):
+        hits = []
+        for mid, d in motif_hits_by_motif(seq, motif_ids).items():
+            w = lib[mid].width
+            for i, occ in zip(d["index"].tolist(), d["occupancy"].tolist()):
+                if occ >= occupancy:
+                    hits.append((mid, int(i), w))
+        if not hits:
+            break
+
+        for mid, start_i, w in hits:
+            lo = max(0, start_i - pad)
+            hi = min(len(seq), start_i + w + pad)
+            motif = lib[mid]
+            for attempt in range(8):
+                mode = "dinuc_shuffle" if attempt < 5 else "mono_shuffle"
+                cand = perturb_patch(seq, lo, hi - lo, rng, mode)
+                if cand == seq:
+                    continue
+                # Did it actually clear, without creating a new match nearby?
+                region = cand[max(0, lo - motif.width):min(len(cand), hi + motif.width)]
+                if motif_occupancy(region, motif).max(initial=0.0) < occupancy:
+                    seq = cand
+                    removed += 1
+                    break
+            else:
+                # Repeated shuffles could not clear it; redraw the patch.
+                sub = "".join(rng.choice(list(ALPHABET), hi - lo))
+                seq = seq[:lo] + sub + seq[hi:]
+                removed += 1
+
+    return seq, removed
+
+
 def random_background(length: int = 2001, tss_index: int | None = None,
                       gc: float = 0.45, cpg_oe: float = 0.25,
-                      seed: int | None = None) -> dict:
+                      seed: int | None = None,
+                      scrub_celltype_elements: bool = True) -> dict:
     """Generate a random background with a target GC content and CpG o/e ratio.
 
     ``cpg_oe`` near 0.2-0.25 is typical of bulk human genomic sequence;
@@ -134,11 +200,27 @@ def random_background(length: int = 2001, tss_index: int | None = None,
     _tune_cpg(chars, target_cpg, rng)
 
     seq = "".join(chars)
+
+    scrubbed = 0
+    if scrub_celltype_elements:
+        from motifs import celltype_element_order
+        seq, scrubbed = scrub_motifs(seq, celltype_element_order(), rng)
+
     return {
         "sequence": seq,
         "tss_index": tss_index,
         "length": length,
-        "requested": {"gc": gc, "cpg_oe": cpg_oe, "seed": seed},
+        "scrubbed_celltype_sites": scrubbed,
+        "scrub_note": (
+            f"{scrubbed} chance lineage TF site(s) were shuffled out of the "
+            f"background so designed sites are visible against it. Base and "
+            f"CpG composition are unchanged. Turn this off to design against "
+            f"genuinely random sequence." if scrubbed else
+            ("background left as drawn; no strong chance lineage site was "
+             "present" if scrub_celltype_elements else
+             "scrubbing off: the background may contain chance lineage sites")),
+        "requested": {"gc": gc, "cpg_oe": cpg_oe, "seed": seed,
+                      "scrub_celltype_elements": scrub_celltype_elements},
         "achieved": {
             "gc": round(gc_content(seq), 4),
             "cpg_oe": round(cpg_observed_expected(seq), 4),
@@ -305,3 +387,99 @@ __all__ = [
     "gc_content", "cpg_observed_expected", "count_cpg", "to_placements",
     "element_width", "sequence_hash", "to_fasta", "reverse_complement",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Perturbations, for attribution
+# ---------------------------------------------------------------------------
+
+def dinuc_shuffle(seq: str, rng: np.random.Generator) -> str:
+    """Shuffle a sequence while preserving its dinucleotide composition.
+
+    Altschul-Erikson: the dinucleotides of a sequence are the edges of a
+    multigraph on {A,C,G,T}, so any Eulerian path with the same start and end
+    vertex has exactly the same dinucleotide counts.
+
+    Preserving dinucleotides (not just base composition) matters here because
+    Puffin has an explicit trinucleotide branch and a CpG-sensitive response.
+    A plain mononucleotide shuffle changes local CpG content, so attribution
+    computed against it would confound "this motif matters" with "the CpG
+    content here matters".
+    """
+    if len(seq) < 3:
+        return seq
+
+    edges: dict[str, list[str]] = {}
+    for a, b in zip(seq[:-1], seq[1:]):
+        edges.setdefault(a, []).append(b)
+    first, last = seq[0], seq[-1]
+    verts = list(edges)
+
+    # Pick, for every vertex but the last, one outgoing edge to traverse last.
+    # Those edges must form a tree rooted at `last`, or the walk dead-ends.
+    chosen: dict[str, str] = {}
+    for _ in range(200):
+        chosen = {v: edges[v][int(rng.integers(len(edges[v])))]
+                  for v in verts if v != last}
+        ok = True
+        for v in verts:
+            if v == last:
+                continue
+            seen, u = set(), v
+            while u != last:
+                if u in seen or u not in chosen:
+                    ok = False
+                    break
+                seen.add(u)
+                u = chosen[u]
+            if not ok:
+                break
+        if ok:
+            break
+    else:
+        return seq  # give up rather than return something with wrong statistics
+
+    order: dict[str, list[str]] = {}
+    for v in verts:
+        rest = list(edges[v])
+        if v != last:
+            rest.remove(chosen[v])
+            rng.shuffle(rest)
+            rest.append(chosen[v])
+        else:
+            rng.shuffle(rest)
+        order[v] = rest
+
+    out = [first]
+    used: dict[str, int] = {v: 0 for v in verts}
+    u = first
+    for _ in range(len(seq) - 1):
+        nxt = order[u][used[u]]
+        used[u] += 1
+        out.append(nxt)
+        u = nxt
+    return "".join(out)
+
+
+def perturb_patch(sequence: str, start: int, width: int,
+                  rng: np.random.Generator, mode: str = "dinuc_shuffle") -> str:
+    """Return ``sequence`` with the bases in [start, start+width) disrupted.
+
+    ``dinuc_shuffle`` keeps composition and destroys motifs; ``mono_shuffle``
+    keeps only base composition; ``neutral`` writes N, which removes the bases
+    from the model's view entirely rather than replacing them.
+    """
+    lo = max(0, int(start))
+    hi = min(len(sequence), int(start + width))
+    if hi <= lo:
+        return sequence
+    patch = sequence[lo:hi]
+    if mode == "neutral":
+        new = "N" * len(patch)
+    elif mode == "mono_shuffle":
+        arr = list(patch)
+        rng.shuffle(arr)
+        new = "".join(arr)
+    else:
+        new = dinuc_shuffle(patch, rng)
+    return sequence[:lo] + new + sequence[hi:]

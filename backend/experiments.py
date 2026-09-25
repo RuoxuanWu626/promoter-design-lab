@@ -39,11 +39,13 @@ import numpy as np
 
 import adapters
 import scoring
+from adapters.mock_common import motif_hits_by_motif
 from motifs import CPG_SEGMENT_ID, get_library, library_order
 from sequence import (
     Placement,
     build_construct,
     element_width,
+    perturb_patch,
     random_background,
     sequence_hash,
     to_placements,
@@ -542,4 +544,232 @@ def spacing_curve(backgrounds: list[dict], motif_a: str, motif_b: str,
                  "Spacings flagged in 'junction_risk' are close enough that "
                  "scan windows span the junction, so part of the residual is "
                  "a sequence-composition artefact."),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Mode 1b: what in the sequence drives specificity?
+# ---------------------------------------------------------------------------
+
+def specificity_attribution(background: dict, placements: list[dict] | None,
+                            model: str = "mock_alphagenome",
+                            cell_types: list[str] | None = None,
+                            target: str | None = None,
+                            window: tuple[int, int] = (-300, 100),
+                            patch: int = 12, stride: int = 6,
+                            n_shuffles: int = 3,
+                            perturbation: str = "dinuc_shuffle",
+                            activity_window: tuple[int, int] = (-200, 200),
+                            activity_method: str = "mean",
+                            predict_window: tuple[int, int] = DEFAULT_WINDOW,
+                            progress: dict | None = None) -> dict:
+    """Occlusion attribution over the promoter, scored two different ways.
+
+    A patch of sequence is disrupted (dinucleotide-shuffled by default, so base
+    and CpG composition survive and only the arrangement is destroyed), the
+    cell-type panel is re-predicted, and two separate attributions are recorded:
+
+    ``activity`` : how much the patch contributes to *how much* transcription
+                   there is, averaged over the panel.
+    ``specificity`` : how much the patch contributes to *tau*, i.e. to the
+                   unevenness of the panel.
+
+    Those are different questions, and the point of the panel is that they do
+    not have to have the same answer. Puffin's ten motifs are core promoter
+    elements: they largely set initiation strength and shape, and a core
+    promoter motif can carry almost all of the activity attribution while
+    carrying very little of the specificity attribution. Whatever makes a
+    promoter *cell-type specific* generally lives in the rest of the sequence.
+
+    The summary at the end quantifies exactly that split: what fraction of each
+    kind of attribution falls inside annotated core-promoter motif footprints
+    versus outside them.
+
+    Attribution is defined as ``original - perturbed``, so a positive value
+    means the patch was contributing.
+    """
+    seq0 = background["sequence"]
+    tss = background["tss_index"]
+    pls = to_placements(placements or [])
+    con = build_construct(seq0, tss, pls, seed=0)
+    sequence = con["sequence"]
+
+    adapter = adapters.get_celltype_adapter(model)
+    cts = cell_types or adapter.default_cell_types
+
+    def score(seq: str) -> tuple[float, float, float, np.ndarray]:
+        pred = adapters.predict_celltype(model, seq, tss, cts, predict_window)
+        act = np.array([
+            scoring.activity_from_profile(pred.profiles[i], pred.positions,
+                                          activity_window, activity_method)
+            for i in range(len(pred.cell_types))])
+        tgt = float(act[list(pred.cell_types).index(target)]) if target in pred.cell_types else float("nan")
+        return scoring.tau_specificity(act), float(act.mean()), tgt, act
+
+    tau0, mean0, tgt0, act0 = score(sequence)
+
+    starts = list(range(int(window[0]), int(window[1]) - patch + 2, max(1, int(stride))))
+    if progress is not None:
+        progress.update({"total": len(starts), "done": 0, "stage": "attribution"})
+
+    centers, a_tau, a_act, a_tgt = [], [], [], []
+    per_ct = []
+    for k, rel in enumerate(starts):
+        if progress is not None:
+            progress["done"] = k
+            progress["detail"] = f"patch at {rel:+d}"
+        taus, means, tgts, acts = [], [], [], []
+        for s in range(max(1, int(n_shuffles))):
+            rng = np.random.default_rng(1000 * (rel + 10_000) + s)
+            pert = perturb_patch(sequence, tss + rel, patch, rng, perturbation)
+            t, m, g, a = score(pert)
+            taus.append(t); means.append(m); tgts.append(g); acts.append(a)
+        centers.append(rel + patch // 2)
+        a_tau.append(tau0 - float(np.mean(taus)))
+        a_act.append(mean0 - float(np.mean(means)))
+        a_tgt.append(tgt0 - float(np.mean(tgts)))
+        per_ct.append((act0 - np.mean(acts, axis=0)).tolist())
+
+    centers = np.array(centers)
+    a_tau = np.array(a_tau)
+    a_act = np.array(a_act)
+
+    # --- which patches sit on what? -----------------------------------------
+    # Core promoter motifs and lineage TF sites are counted separately. That
+    # separation is the entire question: if activity attribution piles up on
+    # the core promoter while specificity attribution piles up on the lineage
+    # sites, then the two are encoded by different sequence.
+    lib = get_library()
+    footprints = []
+    for p in con["placements"]:
+        if p.get("out_of_range") or not p.get("written"):
+            continue
+        w = len(p["written"])
+        motif = lib.get(p["element_id"])
+        kind = getattr(motif, "kind", "core_promoter") if motif else "other"
+        footprints.append({
+            "element_id": p["element_id"],
+            "name": motif.name if motif else p["element_id"],
+            "kind": kind,
+            "start": int(p["start_rel"]), "end": int(p["start_rel"]) + w - 1,
+            "source": "placed",
+        })
+
+    # Motifs that occur by chance in the background are real to the model and
+    # will attract attribution, so they have to be annotated too. Without this
+    # a chance GATA site upstream would be scored as "elsewhere" and the
+    # summary would understate how much specificity sits on lineage sites.
+    placed_spans = [(f["start"], f["end"]) for f in footprints]
+    for mid, d in motif_hits_by_motif(sequence).items():
+        motif = lib.get(mid)
+        if motif is None or d["index"].size == 0:
+            continue
+        kind = getattr(motif, "kind", "core_promoter")
+        for i, occ in zip(d["index"].tolist(), d["occupancy"].tolist()):
+            if occ < 0.5:
+                continue
+            start = int(i) - tss
+            end = start + motif.width - 1
+            if any(start <= pe and end >= ps for ps, pe in placed_spans):
+                continue
+            if end < window[0] - patch or start > window[1] + patch:
+                continue
+            footprints.append({
+                "element_id": mid, "name": motif.name, "kind": kind,
+                "start": start, "end": end, "source": "background",
+                "occupancy": round(float(occ), 3),
+            })
+
+    def coverage(kind: str | None) -> np.ndarray:
+        cov = np.zeros(centers.size, dtype=bool)
+        for f in footprints:
+            if kind is not None and f["kind"] != kind:
+                continue
+            cov |= ((centers >= f["start"] - patch // 2)
+                    & (centers <= f["end"] + patch // 2))
+        return cov
+
+    cov_core = coverage("core_promoter")
+    cov_elem = coverage("celltype_element")
+    cov_any = coverage(None)
+
+    def split(vals: np.ndarray) -> dict:
+        tot = float(np.abs(vals).sum())
+        if tot <= 0:
+            return {"total_abs": 0.0, "on_core_promoter": 0.0,
+                    "on_celltype_elements": 0.0, "elsewhere": 0.0,
+                    "fraction_on_core_promoter": 0.0,
+                    "fraction_on_celltype_elements": 0.0,
+                    "fraction_elsewhere": 0.0}
+        core_abs = float(np.abs(vals[cov_core]).sum())
+        elem_abs = float(np.abs(vals[cov_elem]).sum())
+        else_abs = float(np.abs(vals[~cov_any]).sum())
+        return {
+            "total_abs": tot,
+            "on_core_promoter": core_abs,
+            "on_celltype_elements": elem_abs,
+            "elsewhere": else_abs,
+            "fraction_on_core_promoter": core_abs / tot,
+            "fraction_on_celltype_elements": elem_abs / tot,
+            "fraction_elsewhere": else_abs / tot,
+        }
+
+    act_split = split(a_act)
+    tau_split = split(a_tau)
+    n_cov = int(cov_any.sum())
+
+    return {
+        "mode": "mode1_specificity_attribution",
+        "model": model,
+        "is_mock": adapter.is_mock,
+        "scale": adapter.scale,
+        "target": target,
+        "cell_types": list(cts),
+        "window": list(window),
+        "patch": patch, "stride": stride, "n_shuffles": n_shuffles,
+        "perturbation": perturbation,
+        "positions": centers.tolist(),
+        "attribution_activity": np.round(a_act, 6).tolist(),
+        "attribution_specificity": np.round(a_tau, 6).tolist(),
+        "attribution_target": np.round(np.array(a_tgt), 6).tolist(),
+        "attribution_per_cell_type": np.round(np.array(per_ct), 6).tolist(),
+        "baseline": {"tau": tau0, "mean_activity": mean0, "target_activity": tgt0},
+        "motif_footprints": footprints,
+        "patches_on_motifs": n_cov,
+        "patches_on_core_promoter": int(cov_core.sum()),
+        "patches_on_celltype_elements": int(cov_elem.sum()),
+        "patches_total": int(centers.size),
+        "summary": {
+            "activity": act_split,
+            "specificity": tau_split,
+            # The headline: how much more concentrated activity attribution is
+            # on the core promoter than specificity attribution is. Above 1
+            # means the core promoter sets how much transcription there is
+            # while something else sets which cell types show it.
+            "core_promoter_enrichment_activity_over_specificity": (
+                act_split["fraction_on_core_promoter"]
+                / tau_split["fraction_on_core_promoter"]
+                if tau_split["fraction_on_core_promoter"] > 0 else None),
+            # ...and the mirror image for the lineage sites.
+            "celltype_element_enrichment_specificity_over_activity": (
+                tau_split["fraction_on_celltype_elements"]
+                / act_split["fraction_on_celltype_elements"]
+                if act_split["fraction_on_celltype_elements"] > 0 else None),
+            "patch_fraction_on_core_promoter": (float(cov_core.sum()) / centers.size) if centers.size else 0.0,
+            "patch_fraction_on_celltype_elements": (float(cov_elem.sum()) / centers.size) if centers.size else 0.0,
+        },
+        "caveats": [
+            "Occlusion attribution measures what happens when a patch is "
+            "destroyed, which is not the same as what the patch contributes in "
+            "context; overlapping or redundant elements can both read as "
+            "unimportant.",
+            "Patches are dinucleotide-shuffled, so base and CpG composition are "
+            "preserved and only arrangement is destroyed. Switching to "
+            "'neutral' removes the bases entirely and mixes composition back in.",
+            "Tau depends on the cell-type panel and on the activity scale; "
+            "attribution to tau inherits both dependencies.",
+            "Both placed elements and motifs the scan finds in the background "
+            "are annotated, so a chance lineage site upstream is counted as a "
+            "lineage site rather than as 'elsewhere'.",
+        ],
     }

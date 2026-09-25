@@ -26,6 +26,7 @@ const App = (() => {
 
       State.motifs = motifs.motifs;
       State.motifById = Object.fromEntries(motifs.motifs.map(m => [m.id, m]));
+      State.celltypeElements = motifs.celltype_elements || [];
       State.extraElements = motifs.extra_elements;
       State.provenance = motifs.provenance;
       State.models = models;
@@ -45,9 +46,10 @@ const App = (() => {
       fillSelect('#targetCT', ctOptions, 'id', 'label', '');
       fillSelect('#m1Target', State.cellTypes, 'id', 'label', State.cellTypes[0]?.id);
       fillSelect('#m1Element',
-        State.motifs.map(m => ({ id: m.id, label: m.name }))
+        State.motifs.map(m => ({ id: m.id, label: 'core · ' + m.name }))
+          .concat(State.celltypeElements.map(e => ({ id: e.id, label: 'lineage · ' + e.name })))
           .concat(State.extraElements.map(e => ({ id: e.id, label: e.name }))),
-        'id', 'label', 'ets');
+        'id', 'label', 'gata');
       fillSelect('#m1Model',
         models.celltype.filter(m => m.available).map(m => ({ id: m.name, label: m.label })),
         'id', 'label', State.design.celltypeModel);
@@ -86,9 +88,13 @@ const App = (() => {
       $$('nav.tabs button').forEach(b => b.onclick = () => showView(b.dataset.view));
 
       /* a starting design so the first screen is not empty */
-      State.addPlacement('tata', -31);
-      State.addPlacement('inr', -2);
-      State.addPlacement('sp1', -75);
+      // A starting design that shows the two libraries doing different jobs:
+      // core promoter motifs at the positions Puffin itself prefers, plus one
+      // lineage site upstream.
+      State.addPlacement('tata', State.motifById.tata?.typical_offset ?? -31);
+      State.addPlacement('inr', State.motifById.inr?.typical_offset ?? 0);
+      State.addPlacement('sp1', State.motifById.sp1?.typical_offset ?? -52);
+      State.addPlacement('gata', -120);
       Designer.changed();
 
     } catch (e) {
@@ -102,15 +108,23 @@ const App = (() => {
     const box = $('#aboutContent');
     clear(box);
 
-    box.appendChild(h('div', { class: 'note mock' },
-      h('strong', { text: 'Everything on screen is a mock prediction. ' }),
-      'No trained model is running. The adapters below generate plausible-looking ' +
-      'profiles from hand-written rules so that the interface and the experiment ' +
-      'designs can be built and checked first. Do not read any number here as a ' +
-      'statement about real promoters.'));
+    const real = (State.models.profile || []).concat(State.models.celltype || [])
+      .filter(m => !m.is_mock && m.available);
+    const mocks = (State.models.profile || []).concat(State.models.celltype || [])
+      .filter(m => m.is_mock);
+    box.appendChild(real.length
+      ? h('div', { class: 'note' },
+          h('strong', { text: `${real.length} real model${real.length === 1 ? '' : 's'} loaded: ` }),
+          real.map(m => m.label).join(', '), '. ',
+          `${mocks.length} mock adapter${mocks.length === 1 ? '' : 's'} remain registered as `,
+          'labelled controls. Every plot carries its own badge — check it before reading a number.')
+      : h('div', { class: 'note mock' },
+          h('strong', { text: 'Everything on screen is a mock prediction. ' }),
+          'No trained model loaded. Do not read any number here as a statement about ' +
+          'real promoters.'));
 
     box.appendChild(h('div', { class: 'panel' },
-      h('h3', {}, 'Motif library'),
+      h('h3', {}, 'Core promoter motifs (Puffin)'),
       h('p', { style: { marginTop: 0 }, text: State.provenance }),
       h('table', { class: 'data' },
         h('thead', {}, h('tr', {},
@@ -123,6 +137,24 @@ const App = (() => {
           h('td', { class: 'num', text: m.width }),
           h('td', { class: 'num', text: (m.typical_offset > 0 ? '+' : '') + m.typical_offset }),
           h('td', { style: { fontSize: '11px', color: 'var(--fg-dim)' }, text: m.notes })))))));
+
+    if (State.celltypeElements.length) {
+      box.appendChild(h('div', { class: 'panel' },
+        h('h3', {}, 'Cell-type elements (lineage TF sites)'),
+        h('p', { style: { marginTop: 0, fontSize: '12px', color: 'var(--fg-dim)' },
+                 text: 'A separate library. These are not Puffin filters — they are what ' +
+                       'makes a promoter cell-type specific, and they drive the cell-type ' +
+                       'model rather than the profile model.' }),
+        h('table', { class: 'data' },
+          h('thead', {}, h('tr', {},
+            h('th', { text: 'element' }), h('th', { text: 'consensus' }),
+            h('th', { class: 'num', text: 'width' }), h('th', { text: 'notes' }))),
+          h('tbody', {}, ...State.celltypeElements.map(m => h('tr', {},
+            h('td', {}, h('span', { style: { color: m.color, fontWeight: '600' }, text: m.name })),
+            h('td', { class: 'num', text: m.consensus }),
+            h('td', { class: 'num', text: m.width }),
+            h('td', { style: { fontSize: '11px', color: 'var(--fg-dim)' }, text: m.notes })))))));
+    }
 
     const modelRows = (State.models.profile || []).concat(State.models.celltype || []);
     box.appendChild(h('div', { class: 'panel' },

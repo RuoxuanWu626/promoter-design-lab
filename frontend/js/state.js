@@ -1,8 +1,9 @@
 /* Shared application state. */
 
 const State = {
-  motifs: [],            // [{id,name,consensus,color,...}]
+  motifs: [],            // Puffin's 10 core promoter motifs
   motifById: {},
+  celltypeElements: [],  // lineage TF sites (celltype_elements.py)
   extraElements: [],     // cpg_segment, custom
   models: null,          // /api/models
   cellTypes: [],         // [{id,label,...}]
@@ -14,7 +15,7 @@ const State = {
 
   // --- current design ---
   design: {
-    background: { length: 1001, gc: 0.45, cpg_oe: 0.25, seed: 42 },
+    background: { length: 2001, gc: 0.45, cpg_oe: 0.25, seed: 42, scrub: true },
     placements: [],      // [{uid, element_id, position, strand, seg_length, custom_sequence}]
     selected: null,      // uid
     weights: {},
@@ -34,6 +35,7 @@ const State = {
 
   elementMeta(id) {
     return this.motifById[id] ||
+      this.celltypeElements.find(e => e.id === id) ||
       this.extraElements.find(e => e.id === id) ||
       { id, name: id, color: '#7f8c8d' };
   },
@@ -43,8 +45,8 @@ const State = {
       return Math.max(1, (p.custom_sequence || '').replace(/[^ACGTNacgtn]/g, '').length);
     }
     if (p.element_id === 'cpg_segment') return Math.max(1, p.seg_length || 60);
-    const m = this.motifById[p.element_id];
-    return m ? m.width : 10;
+    const m = this.elementMeta(p.element_id);
+    return m && m.width ? m.width : 10;
   },
 
   /* Payload shared by every backend call that needs the current design. */
@@ -55,6 +57,7 @@ const State = {
       gc: +d.background.gc,
       cpg_oe: +d.background.cpg_oe,
       seed: +d.background.seed,
+      scrub_celltype_elements: !!d.background.scrub,
       placements: d.placements.map(p => ({
         element_id: p.element_id, position: Math.round(p.position),
         strand: p.strand, uid: p.uid,

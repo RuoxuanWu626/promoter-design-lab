@@ -38,6 +38,15 @@ from dataclasses import dataclass, field
 import numpy as np
 
 
+def _finite_list(values, round_to: int = 5) -> list:
+    """Round to a list, turning NaN/Inf into None (valid JSON, plots as a gap)."""
+    a = np.round(np.asarray(values, dtype=float), round_to)
+    finite = np.isfinite(a)
+    if finite.all():
+        return a.tolist()
+    return [None if not f else float(x) for x, f in zip(a.tolist(), finite.tolist())]
+
+
 @dataclass
 class ProfilePrediction:
     """A profile prediction along a construct."""
@@ -54,7 +63,11 @@ class ProfilePrediction:
         return {
             "model": self.model,
             "positions": self.positions.astype(int).tolist(),
-            "tracks": {k: np.round(np.asarray(v, dtype=float), round_to).tolist()
+            # NaN marks positions the model could not validly predict (for
+            # Puffin, where the construct did not supply enough context). It
+            # travels as null so the plot leaves a gap instead of drawing a
+            # zero that looks like a real prediction.
+            "tracks": {k: _finite_list(v, round_to)
                        for k, v in self.tracks.items()},
             "scale": self.scale,
             "output_space": self.output_space,
@@ -81,7 +94,7 @@ class CellTypePrediction:
             "model": self.model,
             "positions": self.positions.astype(int).tolist(),
             "cell_types": list(self.cell_types),
-            "profiles": np.round(self.profiles, round_to).tolist(),
+            "profiles": [_finite_list(row, round_to) for row in self.profiles],
             "scale": self.scale,
             "output_space": self.output_space,
             "is_mock": self.is_mock,

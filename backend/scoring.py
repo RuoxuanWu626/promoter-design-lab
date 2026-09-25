@@ -60,8 +60,9 @@ def activity_from_profile(profile: np.ndarray, positions: np.ndarray,
                           window: tuple[int, int] = (-200, 200),
                           method: str = "mean") -> float:
     """Collapse a profile to one scalar activity within a window around the TSS."""
-    mask = (positions >= window[0]) & (positions <= window[1])
-    seg = np.asarray(profile, dtype=np.float64)[mask]
+    prof = np.asarray(profile, dtype=np.float64)
+    mask = (positions >= window[0]) & (positions <= window[1]) & np.isfinite(prof)
+    seg = prof[mask]
     if seg.size == 0:
         return 0.0
     if method == "sum":
@@ -93,7 +94,14 @@ def profile_metrics(positions: np.ndarray, plus: np.ndarray,
     plus = np.asarray(plus, dtype=np.float64)
     minus = np.zeros_like(plus) if minus is None else np.asarray(minus, dtype=np.float64)
 
+    # Positions a model could not validly predict arrive as NaN (Puffin masks
+    # anywhere its 325 bp of context ran off the construct). They have to be
+    # dropped here, or argmax lands on a NaN and every metric downstream
+    # becomes NaN.
     mask = (positions >= score_window[0]) & (positions <= score_window[1])
+    mask &= np.isfinite(plus)
+    if minus is not None and minus.size == plus.size:
+        mask &= np.isfinite(minus)
     p = plus[mask]
     m = minus[mask]
     pos = positions[mask]
@@ -333,3 +341,128 @@ def metric_catalogue() -> list[dict]:
         "name": k, "label": v[0], "lo": v[1], "hi": v[2],
         "higher_is_better": v[3], "group": v[4],
     } for k, v in METRIC_SPECS.items()]
+
+
+# ---------------------------------------------------------------------------
+# Model agreement
+# ---------------------------------------------------------------------------
+
+def pearson_r(a, b) -> float:
+    """Pearson correlation, NaN-safe, returning 0.0 when either side is flat."""
+    a = np.asarray(a, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    n = min(a.size, b.size)
+    a, b = a[:n], b[:n]
+    ok = np.isfinite(a) & np.isfinite(b)
+    if ok.sum() < 3:
+        return 0.0
+    a, b = a[ok] - a[ok].mean(), b[ok] - b[ok].mean()
+    den = float(np.sqrt((a * a).sum() * (b * b).sum()))
+    return float((a * b).sum() / den) if den > 0 else 0.0
+
+
+def _rank(x: np.ndarray) -> np.ndarray:
+    """Average ranks, so ties do not bias the rank correlation."""
+    order = np.argsort(x, kind="stable")
+    ranks = np.empty(x.size, dtype=np.float64)
+    ranks[order] = np.arange(x.size, dtype=np.float64)
+    sx = x[order]
+    i = 0
+    while i < sx.size:
+        j = i
+        while j + 1 < sx.size and sx[j + 1] == sx[i]:
+            j += 1
+        if j > i:
+            ranks[order[i:j + 1]] = (i + j) / 2.0
+        i = j + 1
+    return ranks
+
+
+def spearman_r(a, b) -> float:
+    a = np.asarray(a, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    n = min(a.size, b.size)
+    a, b = a[:n], b[:n]
+    ok = np.isfinite(a) & np.isfinite(b)
+    if ok.sum() < 3:
+        return 0.0
+    return pearson_r(_rank(a[ok]), _rank(b[ok]))
+
+
+def normalise_profile(x, output_space: str, transform: str = "log1p") -> np.ndarray:
+    """Put a profile on a comparable footing before correlating.
+
+    Two models can agree perfectly on shape and still be on wildly different
+    numeric scales (Puffin emits a small non-negative signal, the CAGE mock
+    emits a log10 CPM). Pearson r is invariant to an affine change, so scale
+    alone does not matter — but a log-like output compared against a linear one
+    is NOT an affine relationship, and correlating them raw measures the wrong
+    thing. So both sides are brought to the same space first.
+    """
+    v = np.asarray(x, dtype=np.float64)
+    if transform == "none":
+        return v
+    if output_space == "log":
+        v = np.power(10.0, v) - 1.0          # back to a count-like scale
+    return np.log1p(np.clip(v, 0.0, None))   # ...then a common log space
+
+
+def profile_agreement(entries: list[dict], transform: str = "log1p",
+                      window: tuple[int, int] | None = None) -> dict:
+    """Pairwise agreement between model profiles.
+
+    ``entries`` is a list of ``{"name", "label", "positions", "values",
+    "output_space", "role"}``. ``role`` is free text such as "simple" or
+    "deep"; it is only used to label the comparison.
+
+    Reported per pair: Pearson r (linear agreement on the common scale),
+    Spearman rho (rank agreement, insensitive to the transform), and the
+    Pearson r of the two profiles after peak-normalising, which answers
+    "do they agree on the shape" separately from "do they agree on the level".
+    """
+    prepared = []
+    for e in entries:
+        pos = np.asarray(e["positions"])
+        val = normalise_profile(e["values"], e.get("output_space", "linear"), transform)
+        if window is not None:
+            m = (pos >= window[0]) & (pos <= window[1])
+            pos, val = pos[m], val[m]
+        prepared.append({**e, "pos": pos, "val": val})
+
+    pairs = []
+    for i in range(len(prepared)):
+        for j in range(i + 1, len(prepared)):
+            a, b = prepared[i], prepared[j]
+            n = min(a["val"].size, b["val"].size)
+            va, vb = a["val"][:n], b["val"][:n]
+            pa = va / va.max() if va.size and va.max() > 0 else va
+            pb = vb / vb.max() if vb.size and vb.max() > 0 else vb
+            pairs.append({
+                "a": a["name"], "b": b["name"],
+                "a_label": a.get("label", a["name"]),
+                "b_label": b.get("label", b["name"]),
+                "a_role": a.get("role"), "b_role": b.get("role"),
+                "n_positions": int(n),
+                "pearson_r": round(pearson_r(va, vb), 5),
+                "spearman_r": round(spearman_r(va, vb), 5),
+                "shape_pearson_r": round(pearson_r(pa, pb), 5),
+                "transform": transform,
+            })
+    return {
+        "transform": transform,
+        "window": list(window) if window else None,
+        "series": [{"name": p["name"], "label": p.get("label", p["name"]),
+                    "role": p.get("role"),
+                    "positions": p["pos"].astype(int).tolist(),
+                    "values": np.round(p["val"], 6).tolist(),
+                    "output_space": p.get("output_space", "linear")}
+                   for p in prepared],
+        "pairs": pairs,
+        "note": (
+            "Pearson r is computed after bringing both models to a common "
+            "log1p scale, because correlating a log-like output against a "
+            "linear one raw would measure the transform rather than the "
+            "agreement. r is invariant to scale and offset, so it answers "
+            "'do these two models rise and fall together along the sequence', "
+            "not 'do they predict the same magnitude'."),
+    }

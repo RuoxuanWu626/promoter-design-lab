@@ -20,7 +20,7 @@ import experiments as E
 import scoring
 import sequence as S
 from adapters.mock_common import motif_hits_by_motif
-from motifs import get_library, null_threshold
+from motifs import celltype_element_order, get_library, null_threshold
 
 FAILS: list[str] = []
 CHECKS = [0]
@@ -68,9 +68,12 @@ con = S.build_construct(base["sequence"], base["tss_index"], pl, seed=1)
 check("placing elements preserves length",
       len(con["sequence"]) == len(base["sequence"]),
       f"{len(base['sequence'])} -> {len(con['sequence'])}")
+_tata = get_library()["tata"]
 check("element bases actually land at the requested position",
-      con["sequence"][base["tss_index"] - 31: base["tss_index"] - 31 + 8]
-      == get_library()["tata"].consensus_instance())
+      con["sequence"][base["tss_index"] - 31:
+                      base["tss_index"] - 31 + _tata.width]
+      == _tata.consensus_instance(),
+      f"TATA is {_tata.width} bp: {_tata.consensus}")
 check("a minus-strand placement writes the reverse complement",
       S.build_construct(base["sequence"], base["tss_index"],
                         S.to_placements([{"element_id": "ets", "position": 0, "strand": "-"}]),
@@ -168,7 +171,9 @@ check("tau is 0 for all-zero input rather than NaN",
       scoring.tau_specificity(np.zeros(5)) == 0.0)
 
 offs = list(range(-200, 81, 20))
-scan = E.position_scan_multi(bgs, {"element_id": "u1", "strand": "+"}, offs,
+# REST/NRSE represses every non-neuronal line, so sliding it with a neuronal
+# target is the off-target-silencing route.
+scan = E.position_scan_multi(bgs, {"element_id": "rest", "strand": "+"}, offs,
                              target="SK-N-SH")
 check("a position scan returns one activity per cell type per offset",
       np.array(scan["activity"]).shape == (len(scan["cell_types"]), len(offs)))
@@ -181,7 +186,8 @@ mechs = {d["mechanism"] for d in scan["decomposition"] if d}
 check("off-target loss is reachable, not just target gain",
       any("off-target loss" in m for m in mechs), f"seen: {sorted(mechs)}")
 
-gain = E.position_scan_multi(bgs, {"element_id": "ets", "strand": "+"}, offs,
+# GATA activates erythroid only, so this is the target-gain route.
+gain = E.position_scan_multi(bgs, {"element_id": "gata", "strand": "+"}, offs,
                              target="K562")
 gmechs = {d["mechanism"] for d in gain["decomposition"] if d}
 check("target gain is reachable too",
@@ -194,6 +200,95 @@ dec2 = scoring.decompose_specificity_change(
     np.array([1.0, 1.0, 1.0]), np.array([1.0, 0.3, 0.3]), ["a", "b", "c"], "a")
 check("a pure off-target fall is labelled off-target loss",
       dec2["mechanism"] == "off-target loss")
+
+# ---------------------------------------------------------------------------
+section("Mode 1 - core promoter vs lineage sites")
+
+clean = S.random_background(length=2001, gc=0.45, cpg_oe=0.25, seed=42)
+check("scrubbing leaves no chance lineage site behind",
+      not [1 for _m, d in
+           __import__("adapters.mock_common", fromlist=["x"]).motif_hits_by_motif(
+               clean["sequence"], celltype_element_order()).items()
+           for o in d["occupancy"] if o > 0.5],
+      f"{clean['scrubbed_celltype_sites']} removed")
+check("scrubbing preserves composition",
+      abs(clean["achieved"]["gc"] - 0.45) < 0.03,
+      f"GC {clean['achieved']['gc']:.3f}, CpG o/e {clean['achieved']['cpg_oe']:.3f}")
+
+
+def _panel(placements):
+    con = S.build_construct(clean["sequence"], clean["tss_index"],
+                            S.to_placements(placements), seed=1)
+    pred = adapters.predict_celltype("mock_alphagenome", con["sequence"],
+                                     con["tss_index"], None, (-500, 500))
+    act = np.array([
+        scoring.activity_from_profile(pred.profiles[i], pred.positions, (-200, 200), "mean")
+        for i in range(len(pred.cell_types))])
+    m = scoring.celltype_metrics(list(pred.cell_types), act)
+    return m["tau"], m["strongest_cell_type"], float(act.mean())
+
+
+_core = [{"element_id": "tata", "position": -31},
+         {"element_id": "inr", "position": 0},
+         {"element_id": "sp1", "position": -52}]
+tau_empty, _, act_empty = _panel([])
+tau_core, _, act_core = _panel(_core)
+check("an empty scrubbed background is not cell-type specific",
+      tau_empty < 0.08, f"tau = {tau_empty:.3f}")
+check("core promoter motifs raise activity",
+      act_core > act_empty * 1.15, f"{act_empty:.2f} -> {act_core:.2f}")
+check("core promoter motifs do NOT create specificity",
+      abs(tau_core - tau_empty) < 0.05,
+      f"tau {tau_empty:.3f} -> {tau_core:.3f}; this is the claim Mode 1 rests on")
+
+_expect = {"gata": "K562", "hnf4": ("HepG2", "Hepatocyte"), "spi1": "GM12878",
+           "sox_oct": "H1", "ere": "MCF-7", "ebox_neuro": "SK-N-SH"}
+_hits = []
+for _eid, _want in _expect.items():
+    _t, _strong, _a = _panel(_core + [{"element_id": _eid, "position": -120}])
+    _want_t = _want if isinstance(_want, tuple) else (_want,)
+    _hits.append((_eid, _strong in _want_t, _t))
+check("one lineage site makes its own cell type the strongest",
+      all(ok_ for _e, ok_, _t in _hits),
+      ", ".join(f"{e}{'ok' if o else ' MISS'}" for e, o, _t in _hits))
+check("one lineage site raises tau well above the core-only baseline",
+      all(t > tau_core + 0.08 for _e, _o, t in _hits),
+      f"core-only tau {tau_core:.3f}, with a site {min(t for _e,_o,t in _hits):.3f}-{max(t for _e,_o,t in _hits):.3f}")
+
+_attr = E.specificity_attribution(
+    clean, _core + [{"element_id": "gata", "position": -120}], target="K562",
+    window=(-220, 60), patch=12, stride=8, n_shuffles=2)
+_a, _t = _attr["summary"]["activity"], _attr["summary"]["specificity"]
+check("activity attribution concentrates on the core promoter",
+      _a["fraction_on_core_promoter"] > _a["fraction_on_celltype_elements"] * 3,
+      f"core {_a['fraction_on_core_promoter']:.0%} vs lineage {_a['fraction_on_celltype_elements']:.0%}")
+check("specificity attribution shifts onto the lineage site",
+      _t["fraction_on_celltype_elements"] > _a["fraction_on_celltype_elements"] * 3,
+      f"lineage carries {_t['fraction_on_celltype_elements']:.0%} of specificity "
+      f"vs {_a['fraction_on_celltype_elements']:.0%} of activity")
+check("background-occurring motifs are annotated, not counted as 'elsewhere'",
+      any(f.get("source") == "background" for f in _attr["motif_footprints"])
+      or _attr["patches_on_celltype_elements"] > 0)
+
+# ---------------------------------------------------------------------------
+section("model agreement")
+
+_ent = [
+    {"name": "a", "positions": np.arange(100), "values": np.sin(np.arange(100) / 8.0) + 2,
+     "output_space": "linear", "role": "simple"},
+    {"name": "b", "positions": np.arange(100), "values": 3 * (np.sin(np.arange(100) / 8.0) + 2),
+     "output_space": "linear", "role": "deep"},
+]
+_ag = scoring.profile_agreement(_ent, transform="none")
+check("Pearson r is invariant to a pure scale change",
+      abs(_ag["pairs"][0]["pearson_r"] - 1.0) < 1e-6,
+      f"r = {_ag['pairs'][0]['pearson_r']}")
+check("anti-correlated profiles give r = -1",
+      abs(scoring.pearson_r(np.arange(50), -np.arange(50)) + 1.0) < 1e-9)
+check("a flat profile gives r = 0 rather than NaN",
+      scoring.pearson_r(np.ones(50), np.arange(50)) == 0.0)
+check("Spearman handles ties without blowing up",
+      abs(scoring.spearman_r(np.array([1, 1, 2, 3]), np.array([1, 2, 2, 3]))) <= 1.0)
 
 # ---------------------------------------------------------------------------
 section("scoring")
