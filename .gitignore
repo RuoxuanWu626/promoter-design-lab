@@ -1,0 +1,16 @@
+# Live server state — never committed.
+# store.json holds player names, challenges and submissions; runs/ holds saved
+# experiment bundles. Both are per-deployment, not source.
+data/*
+!data/.gitkeep
+
+# Slurm job scripts and server logs
+logs/
+
+# Real motif weights, if dropped in (large, and not ours to redistribute)
+data/puffin_motifs.npz
+
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store

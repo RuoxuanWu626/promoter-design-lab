@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Promoter Design Lab</title>
+<link rel="stylesheet" href="css/app.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>🧬</text></svg>">
+</head>
+<body>
+<div id="app">
+
+  <header class="topbar">
+    <h1>Promoter Design Lab</h1>
+    <span class="sub">motif placement · cell-type specificity · model interactions</span>
+    <span class="badge mock dot" id="mockBadge" title="No trained model is being used">mock predictions</span>
+    <span class="spacer"></span>
+    <label style="color:var(--fg-faint);font-size:11.5px">player</label>
+    <input type="text" id="playerName" style="width:130px" placeholder="your name">
+    <span class="badge" id="serverStatus" style="color:var(--fg-faint)">connecting…</span>
+  </header>
+
+  <nav class="tabs">
+    <button data-view="design" class="active">Design</button>
+    <button data-view="mode1">Mode 1 · Specificity</button>
+    <button data-view="mode2">Mode 2 · Interactions</button>
+    <button data-view="board">Leaderboard</button>
+    <button data-view="about">Models &amp; Caveats</button>
+  </nav>
+
+  <main>
+
+    <!-- ================= DESIGN ================= -->
+    <section class="view active" id="view-design">
+      <aside class="sidebar">
+        <div class="panel">
+          <h3>Background sequence</h3>
+          <div class="row"><label>Length</label>
+            <input type="number" id="bgLength" value="1001" min="200" max="8000" step="100"></div>
+          <div class="row"><label>GC content</label>
+            <input type="range" id="bgGC" min="0.25" max="0.75" step="0.01" value="0.45">
+            <span class="val" id="bgGCv">0.45</span></div>
+          <div class="row"><label>CpG o/e</label>
+            <input type="range" id="bgCpG" min="0.05" max="1.20" step="0.01" value="0.25">
+            <span class="val" id="bgCpGv">0.25</span></div>
+          <div class="row"><label>Seed</label>
+            <input type="number" id="bgSeed" value="42"></div>
+          <div class="btnrow">
+            <button class="btn sm" id="btnNewBg">New background</button>
+            <button class="btn sm" id="btnRerollBg">Re-roll seed</button>
+          </div>
+          <div class="hint" id="bgStats">–</div>
+        </div>
+
+        <div class="panel">
+          <h3>Motif library <span style="text-transform:none;letter-spacing:0">(click or drag onto the track)</span></h3>
+          <div class="palette" id="palette"></div>
+          <div class="hint">Puffin's 10 motifs, plus a CpG-rich segment and a custom sequence.
+            Placing an element <strong>overwrites</strong> bases, so length never changes.</div>
+        </div>
+
+        <div class="panel">
+          <h3>Placed elements <span id="elCount" style="color:var(--fg-dim)"></span></h3>
+          <div class="elist" id="elist"></div>
+          <div class="btnrow" style="margin-top:8px">
+            <button class="btn sm" id="btnClearEls">Clear all</button>
+            <button class="btn sm" id="btnSnapTypical">Snap to typical positions</button>
+          </div>
+          <div class="hint">Drag boxes on the track, or edit positions here.
+            Keyboard: ← → nudge 1 bp, Shift+← → 10 bp, R reverse, D duplicate, Del remove.</div>
+        </div>
+
+        <div class="panel">
+          <h3>Scoring</h3>
+          <div class="row"><label>Target cell type</label>
+            <select id="targetCT"></select></div>
+          <div class="row"><label>Preset</label>
+            <select id="weightPreset">
+              <option value="design">Focused promoter</option>
+              <option value="mode1">Cell-type specific</option>
+              <option value="custom">Custom</option>
+            </select></div>
+          <div id="weightSliders"></div>
+        </div>
+
+        <div class="panel">
+          <h3>Export</h3>
+          <div class="btnrow">
+            <button class="btn sm" id="btnExFasta">FASTA</button>
+            <button class="btn sm" id="btnExJson">Design JSON</button>
+            <button class="btn sm" id="btnExProfiles">Profiles CSV</button>
+            <button class="btn sm" id="btnExBundle">Save run on server</button>
+          </div>
+        </div>
+      </aside>
+
+      <div class="content" id="designContent">
+        <div class="stat-strip" id="designStats"></div>
+
+        <div class="panel flush">
+          <div class="body" style="padding-bottom:4px">
+            <div class="plot-title">Construct map
+              <span class="badge warn" style="font-size:9.5px;padding:1px 7px">TSS = position 0</span></div>
+            <p class="plot-sub" id="trackSub">Drag an element to move it. Scroll to zoom, shift+scroll to pan.</p>
+          </div>
+          <div class="plotwrap" style="margin:0"><canvas id="trackCanvas"></canvas></div>
+          <div class="body" style="padding-top:6px">
+            <div class="row" style="margin:0">
+              <label style="flex-basis:60px">Zoom</label>
+              <input type="range" id="zoomRange" min="0" max="100" value="35" style="flex:1">
+              <span class="val" id="zoomLabel">±500</span>
+              <button class="btn sm" id="btnZoomFit">Fit</button>
+              <button class="btn sm" id="btnZoomTSS">TSS ±100</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel" id="profilePanel">
+          <h3>Predicted transcription profiles</h3>
+          <div id="profilePlots"></div>
+        </div>
+
+        <div class="grid2" style="align-items:start">
+          <div class="panel">
+            <h3>Cell-type activity</h3>
+            <div class="plotwrap"><canvas id="ctBars"></canvas></div>
+            <div id="ctSummary"></div>
+          </div>
+          <div class="panel">
+            <h3>Metrics &amp; weighted score</h3>
+            <div id="metricsTable"></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h3>Sequence around the TSS</h3>
+          <div class="seqbox" id="seqBox">–</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= MODE 1 ================= -->
+    <section class="view" id="view-mode1">
+      <aside class="sidebar wide">
+        <div class="note mock">
+          <strong>Mode 1 · Where is cell-type specificity encoded?</strong><br>
+          Slide one element across positions relative to the TSS and watch the
+          whole cell-type panel respond. The question is not only <em>how much</em>
+          specificity you get, but <em>how</em>: by raising the target, or by
+          dropping everything else.
+        </div>
+
+        <div class="panel">
+          <h3>Element to slide</h3>
+          <div class="row"><label>Element</label><select id="m1Element"></select></div>
+          <div class="row"><label>Strand</label>
+            <select id="m1Strand"><option value="+">+ (plus)</option><option value="-">− (minus)</option></select></div>
+          <div id="m1CustomWrap" style="display:none">
+            <div class="row"><label>Sequence</label></div>
+            <textarea id="m1Custom" rows="3" placeholder="ACGT…"></textarea>
+          </div>
+          <div class="row" id="m1SegWrap" style="display:none">
+            <label>Segment bp</label><input type="number" id="m1SegLen" value="60" min="5" max="500">
+          </div>
+        </div>
+
+        <div class="panel">
+          <h3>Position scan</h3>
+          <div class="grid3">
+            <div><label class="hint">from</label><input type="number" id="m1From" value="-300"></div>
+            <div><label class="hint">to</label><input type="number" id="m1To" value="100"></div>
+            <div><label class="hint">step</label><input type="number" id="m1Step" value="5" min="1"></div>
+          </div>
+          <div class="hint" id="m1Count">–</div>
+        </div>
+
+        <div class="panel">
+          <h3>Model &amp; panel</h3>
+          <div class="row"><label>Model</label><select id="m1Model"></select></div>
+          <div class="row"><label>Target</label><select id="m1Target"></select></div>
+          <div class="row"><label>Activity</label>
+            <select id="m1ActMethod">
+              <option value="mean">mean over window</option>
+              <option value="max">max in window</option>
+              <option value="sum">sum over window</option>
+            </select></div>
+          <div class="grid2">
+            <div><label class="hint">window from</label><input type="number" id="m1ActFrom" value="-200"></div>
+            <div><label class="hint">window to</label><input type="number" id="m1ActTo" value="200"></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h3>Backgrounds</h3>
+          <div class="row"><label>Replicates</label>
+            <input type="number" id="m1NBg" value="3" min="1" max="10"></div>
+          <div class="row"><label>Length</label>
+            <input type="number" id="m1Length" value="1001" min="300" max="4000" step="100"></div>
+          <div class="grid2">
+            <div><label class="hint">GC</label><input type="number" id="m1GC" value="0.45" step="0.01"></div>
+            <div><label class="hint">CpG o/e</label><input type="number" id="m1CpG" value="0.25" step="0.01"></div>
+          </div>
+          <div class="row"><label>Base seed</label><input type="number" id="m1Seed" value="1000"></div>
+        </div>
+
+        <div class="btnrow">
+          <button class="btn primary" id="m1Run" style="flex:1">Run position scan</button>
+        </div>
+        <div class="progress" id="m1Progress" style="margin-top:8px;display:none"><div style="width:0"></div></div>
+        <div class="hint" id="m1ProgressText"></div>
+
+        <div class="panel" style="margin-top:11px">
+          <h3>Export</h3>
+          <div class="btnrow">
+            <button class="btn sm" id="m1ExCsv">Results CSV</button>
+            <button class="btn sm" id="m1ExJson">JSON</button>
+            <button class="btn sm" id="m1ExBundle">Save on server</button>
+          </div>
+        </div>
+      </aside>
+
+      <div class="content" id="m1Content">
+        <div class="empty">Set up a scan and press <strong>Run position scan</strong>.</div>
+      </div>
+    </section>
+
+    <!-- ================= MODE 2 ================= -->
+    <section class="view" id="view-mode2">
+      <aside class="sidebar wide">
+        <div class="note mock">
+          <strong>Mode 2 · What interactions do the models learn?</strong><br>
+          Four matched constructs — background, A only, B only, A+B — give the
+          position-wise residual
+          <code style="color:var(--accent)">I = f(A+B) − f(A) − f(B) + f(bg)</code>.
+          It measures departure from additivity <em>in the model</em>, on the
+          scale the model emits. It is not evidence of biological cooperation.
+        </div>
+
+        <div class="panel">
+          <h3>Motif pair</h3>
+          <div class="row"><label>Motif A</label><select id="m2A"></select></div>
+          <div class="row"><label>strand A</label>
+            <select id="m2StrandA"><option value="+">+</option><option value="-">−</option></select></div>
+          <div class="row"><label>Motif B</label><select id="m2B"></select></div>
+          <div class="row"><label>strand B</label>
+            <select id="m2StrandB"><option value="+">+</option><option value="-">−</option></select></div>
+          <div class="hint">Same-motif pairs (A = B) are allowed and are often
+            the most informative.</div>
+        </div>
+
+        <div class="panel">
+          <h3>Geometry</h3>
+          <div class="row"><label>Anchor (A 5′)</label><input type="number" id="m2Anchor" value="-60"></div>
+          <div class="row"><label>Spacing</label><input type="number" id="m2Spacing" value="30"></div>
+          <div class="row"><label>Measured</label>
+            <select id="m2SpacingMode">
+              <option value="center">centre-to-centre</option>
+              <option value="edge">edge-to-edge gap</option>
+            </select></div>
+          <div class="hint" id="m2Geom">–</div>
+        </div>
+
+        <div class="panel">
+          <h3>Models &amp; scale</h3>
+          <div id="m2Models"></div>
+          <div class="row"><label>Track</label>
+            <select id="m2Track"><option value="plus">plus strand</option><option value="minus">minus strand</option></select></div>
+          <div class="row"><label>Residual on</label>
+            <select id="m2Scale">
+              <option value="model">model output scale</option>
+              <option value="linear">linear (back-transformed)</option>
+            </select></div>
+          <div class="hint" id="m2ScaleNote">–</div>
+        </div>
+
+        <div class="panel">
+          <h3>Backgrounds</h3>
+          <div class="row"><label>Replicates</label><input type="number" id="m2NBg" value="3" min="1" max="10"></div>
+          <div class="row"><label>Length</label><input type="number" id="m2Length" value="1001" min="300" max="4000" step="100"></div>
+          <div class="grid2">
+            <div><label class="hint">GC</label><input type="number" id="m2GC" value="0.45" step="0.01"></div>
+            <div><label class="hint">CpG o/e</label><input type="number" id="m2CpG" value="0.25" step="0.01"></div>
+          </div>
+          <div class="row"><label>Base seed</label><input type="number" id="m2Seed" value="1000"></div>
+        </div>
+
+        <div class="panel">
+          <h3>Run</h3>
+          <div class="btnrow">
+            <button class="btn primary" id="m2RunPair" style="flex:1">Single pair</button>
+          </div>
+          <div class="btnrow" style="margin-top:6px">
+            <button class="btn sm" id="m2RunGrid" style="flex:1">10 × 10 grid</button>
+            <button class="btn sm" id="m2RunSpacing" style="flex:1">Spacing curve</button>
+          </div>
+          <div class="grid2" style="margin-top:7px">
+            <div><label class="hint">spacing from</label><input type="number" id="m2SpFrom" value="4"></div>
+            <div><label class="hint">to</label><input type="number" id="m2SpTo" value="80"></div>
+          </div>
+          <div class="grid2">
+            <div><label class="hint">step</label><input type="number" id="m2SpStep" value="2" min="1"></div>
+            <div><label class="hint">statistic</label>
+              <select id="m2Stat">
+                <option value="I_sum_abs">Σ|I|</option>
+                <option value="I_sum">Σ I (signed)</option>
+                <option value="I_max_abs">max |I|</option>
+                <option value="I_at_max_abs">I at max |I|</option>
+                <option value="relative_I">relative |I|</option>
+              </select></div>
+          </div>
+          <div class="row" style="margin-top:6px"><label>Orientations</label></div>
+          <div class="btnrow" id="m2Orients"></div>
+          <div class="progress" id="m2Progress" style="margin-top:8px;display:none"><div style="width:0"></div></div>
+          <div class="hint" id="m2ProgressText"></div>
+        </div>
+
+        <div class="panel">
+          <h3>Export</h3>
+          <div class="btnrow">
+            <button class="btn sm" id="m2ExCsv">Results CSV</button>
+            <button class="btn sm" id="m2ExJson">JSON</button>
+            <button class="btn sm" id="m2ExFasta">Constructs FASTA</button>
+            <button class="btn sm" id="m2ExBundle">Save on server</button>
+          </div>
+        </div>
+      </aside>
+
+      <div class="content" id="m2Content">
+        <div class="subtabs" id="m2Subtabs">
+          <button data-sub="pair" class="active">Pair detail</button>
+          <button data-sub="grid">Pairwise grid</button>
+          <button data-sub="spacing">Spacing curves</button>
+        </div>
+        <div id="m2Pair"><div class="empty">Choose a pair and press <strong>Single pair</strong>.</div></div>
+        <div id="m2Grid" style="display:none"><div class="empty">Press <strong>10 × 10 grid</strong>.</div></div>
+        <div id="m2SpacingView" style="display:none"><div class="empty">Press <strong>Spacing curve</strong>.</div></div>
+      </div>
+    </section>
+
+    <!-- ================= LEADERBOARD ================= -->
+    <section class="view" id="view-board">
+      <aside class="sidebar">
+        <div class="panel">
+          <h3>Challenges</h3>
+          <div class="hint">A challenge pins a background <em>seed</em> and the
+            scoring weights, so everyone starts from exactly the same sequence.</div>
+          <div class="btnrow" style="margin-top:8px">
+            <button class="btn sm primary" id="btnNewChallenge">New from current design settings</button>
+          </div>
+        </div>
+        <div class="panel">
+          <h3>Open challenges</h3>
+          <div id="challengeList"><div class="hint">none yet</div></div>
+        </div>
+      </aside>
+      <div class="content" id="boardContent">
+        <div class="empty">Create or select a challenge.</div>
+      </div>
+    </section>
+
+    <!-- ================= ABOUT ================= -->
+    <section class="view" id="view-about">
+      <div class="content" style="max-width:940px;margin:0 auto">
+        <div id="aboutContent"></div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<script src="js/api.js"></script>
+<script src="js/plot.js"></script>
+<script src="js/state.js"></script>
+<script src="js/designer.js"></script>
+<script src="js/mode1.js"></script>
+<script src="js/mode2.js"></script>
+<script src="js/board.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
