@@ -76,6 +76,60 @@
         </div>
 
         <div class="panel">
+          <h3>Your motifs <span id="customCount" style="color:var(--fg-dim)"></span></h3>
+          <div class="palette" id="paletteCustom"></div>
+          <div class="btnrow" style="margin-top:7px">
+            <button class="btn sm" id="btnAddMotif">+ Add a motif</button>
+            <button class="btn sm" id="btnManageMotifs">Manage</button>
+          </div>
+
+          <div id="motifForm" style="display:none;margin-top:9px;border-top:1px solid var(--line);padding-top:9px">
+            <div class="row"><label>Name</label>
+              <input type="text" id="cmName" placeholder="e.g. GATA1 variant"></div>
+            <div class="row"><label>Type</label>
+              <select id="cmKind">
+                <option value="core_promoter">core promoter (sets activity)</option>
+                <option value="celltype_element">lineage site (sets specificity)</option>
+              </select></div>
+            <div class="row"><label>Define by</label>
+              <select id="cmMode">
+                <option value="consensus">IUPAC consensus</option>
+                <option value="pwm">paste a PWM</option>
+              </select></div>
+            <div id="cmConsensusWrap">
+              <input type="text" id="cmConsensus" placeholder="e.g. AGATWAGA" style="font-family:var(--mono)">
+              <div class="hint">IUPAC codes allowed: A C G T R Y S W K M B D H V N. 4–60 bp.</div>
+            </div>
+            <div id="cmPwmWrap" style="display:none">
+              <textarea id="cmPwm" rows="5" placeholder="A [ 0 3 79 40 ]&#10;C [94 75 4 3 ]&#10;G [ 1 0 3 4 ]&#10;T [ 2 19 11 50 ]"></textarea>
+              <div class="hint">JASPAR-style (4 rows A,C,G,T) or MEME-style (one row per position). Counts or probabilities.</div>
+            </div>
+            <div class="grid2" style="margin-top:6px">
+              <div><label class="hint">preferred 5′ position</label>
+                <input type="number" id="cmOffset" value="-60"></div>
+              <div><label class="hint">colour</label>
+                <input type="text" id="cmColor" placeholder="#e76f51" style="font-family:var(--mono)"></div>
+            </div>
+            <div id="cmCellTypes" style="display:none;margin-top:6px">
+              <div class="row" style="margin-bottom:3px"><label>Activates</label></div>
+              <div class="palette" id="cmActivates"></div>
+              <div class="hint">Click cell types this site turns on. Shift-click marks it repressive there.
+                These only steer the mock cell-type model — a trained model has its own opinion.</div>
+            </div>
+            <div class="row" style="margin-top:6px"><label>Notes</label>
+              <input type="text" id="cmNotes" placeholder="optional"></div>
+            <div class="btnrow" style="margin-top:8px">
+              <button class="btn sm primary" id="cmSave">Save motif</button>
+              <button class="btn sm" id="cmCancel">Cancel</button>
+            </div>
+            <div class="err" id="cmError" style="margin-top:6px"></div>
+          </div>
+
+          <div class="hint">Anything not in Puffin's ten or the lineage list. Placing one
+            writes real bases, so every model — including real Puffin — reacts to the sequence.</div>
+        </div>
+
+        <div class="panel">
           <h3>Other elements</h3>
           <div class="palette" id="paletteOther"></div>
           <div class="hint">Placing an element <strong>overwrites</strong> bases, so the

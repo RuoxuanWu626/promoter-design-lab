@@ -10,6 +10,9 @@ logs/
 # Real motif weights, if dropped in (large, and not ours to redistribute)
 data/puffin_motifs.npz
 
+# Motifs users define through the UI belong to a deployment, not to the repo.
+data/custom_motifs.json
+
 __pycache__/
 *.pyc
 *.pyo

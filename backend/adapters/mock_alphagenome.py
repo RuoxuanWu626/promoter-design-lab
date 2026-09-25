@@ -162,7 +162,8 @@ class MockAlphaGenome(CellTypeAdapter):
         } for p in _PARAMS.values()]
 
     def _profile_for(self, cid: str, sequence: str, tss_index: int,
-                     base: np.ndarray, by_motif: dict) -> np.ndarray:
+                     base: np.ndarray, by_motif: dict,
+                     extra_weights: dict | None = None) -> np.ndarray:
         """One cell type's CAGE-like profile from a pre-computed scan."""
         p = _PARAMS[cid]
         lib = get_library()
@@ -177,7 +178,14 @@ class MockAlphaGenome(CellTypeAdapter):
                 continue
 
             is_element = getattr(motif, "kind", "core_promoter") == "celltype_element"
-            w = (p["element_weights"] if is_element else p["core_weights"]).get(mid)
+            if is_element:
+                w = p["element_weights"].get(mid)
+                if w is None:
+                    # A lineage site the user defined after this adapter was
+                    # built. Its cell-type assignments are read live.
+                    w = (extra_weights or {}).get(mid, {}).get(cid, 0.05)
+            else:
+                w = p["core_weights"].get(mid, CORE_WEIGHT)
             if not w:
                 continue
 
@@ -220,10 +228,15 @@ class MockAlphaGenome(CellTypeAdapter):
 
         base = composition_baseline(sequence)
         by_motif = motif_hits_by_motif(sequence)
+        try:
+            from custom_motifs import activation_map as custom_activation_map
+            extra = custom_activation_map()
+        except Exception:
+            extra = {}
 
         profiles = np.zeros((len(cts), positions.size), dtype=np.float64)
         for i, cid in enumerate(cts):
-            full = self._profile_for(cid, sequence, tss_index, base, by_motif)
+            full = self._profile_for(cid, sequence, tss_index, base, by_motif, extra)
             profiles[i, valid] = full[idx[valid]]
 
         return CellTypePrediction(

@@ -306,14 +306,39 @@ def route(path: str, body: dict, query: dict) -> dict:
         return {"ok": True, "time": time.time(), "cache": adapters.cache_stats(),
                 "store": store.stats(), "pid": os.getpid()}
 
+    if path == "/api/motifs/custom":
+        import custom_motifs
+        if body.get("delete"):
+            if not custom_motifs.remove(str(body["delete"])):
+                raise KeyError(f"no custom motif '{body['delete']}'")
+            return {"deleted": body["delete"], "motifs": custom_motifs.list_motifs()}
+        if body:
+            try:
+                entry = custom_motifs.add(body)
+            except custom_motifs.InvalidMotif as exc:
+                # A validation message written for the user, not a stack trace.
+                raise ValueError(str(exc))
+            m = get_library().get(entry["id"])
+            return {"added": entry["id"],
+                    "motif": m.to_json() if m else entry,
+                    "motifs": custom_motifs.list_motifs()}
+        return {"motifs": custom_motifs.list_motifs(),
+                "limits": {"max": custom_motifs.MAX_MOTIFS,
+                           "min_width": custom_motifs.MIN_WIDTH,
+                           "max_width": custom_motifs.MAX_WIDTH},
+                "iupac": sorted(__import__("motifs").IUPAC)}
+
     if path == "/api/motifs":
-        from motifs import celltype_element_order
+        from motifs import celltype_element_order, custom_motif_order
         return {
             "order": library_order(),
             "motifs": [lib[m].to_json() for m in library_order()],
             "celltype_order": celltype_element_order(),
             "celltype_elements": [lib[m].to_json() for m in celltype_element_order()
                                   if m in lib],
+            "custom_order": custom_motif_order(),
+            "custom_motifs": [lib[m].to_json() for m in custom_motif_order()
+                              if m in lib],
             "extra_elements": [
                 {"id": CPG_SEGMENT_ID, "name": "CpG-rich segment",
                  "kind": "segment", "color": "#7f8c8d",

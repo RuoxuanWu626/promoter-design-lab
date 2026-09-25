@@ -203,8 +203,8 @@ def random_background(length: int = 2001, tss_index: int | None = None,
 
     scrubbed = 0
     if scrub_celltype_elements:
-        from motifs import celltype_element_order
-        seq, scrubbed = scrub_motifs(seq, celltype_element_order(), rng)
+        from motifs import celltype_kind_ids
+        seq, scrubbed = scrub_motifs(seq, celltype_kind_ids(), rng)
 
     return {
         "sequence": seq,

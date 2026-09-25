@@ -26,18 +26,146 @@ const Designer = (() => {
         text: m.consensus.length > 14 ? m.consensus.slice(0, 13) + '…' : m.consensus }) : null);
   }
 
+  let manageMode = false;
+
   function renderPalette() {
     const groups = [
-      ['#palette', State.motifs],
-      ['#paletteCT', State.celltypeElements],
-      ['#paletteOther', State.extraElements],
+      ['#palette', State.motifs, false],
+      ['#paletteCT', State.celltypeElements, false],
+      ['#paletteCustom', State.customMotifs, true],
+      ['#paletteOther', State.extraElements, false],
     ];
-    for (const [sel, items] of groups) {
+    for (const [sel, items, deletable] of groups) {
       const box = $(sel);
       if (!box) continue;
       clear(box);
-      for (const m of items) box.appendChild(chipFor(m));
+      for (const m of items) {
+        const chip = chipFor(m);
+        if (deletable && manageMode) {
+          chip.appendChild(h('button', {
+            class: 'btn icon sm danger', text: '✕', title: `delete ${m.name}`,
+            style: { marginLeft: '4px', padding: '1px 4px' },
+            onclick: async (ev) => {
+              ev.stopPropagation();
+              if (!confirm(`Delete your motif "${m.name}"? Any already placed stays on the track as plain sequence.`)) return;
+              try {
+                await API.post('/api/motifs/custom', { delete: m.id });
+                State.design.placements = State.design.placements.filter(pl => pl.element_id !== m.id);
+                await App.reloadMotifs();
+                changed();
+                toast(`deleted ${m.name}`);
+              } catch (e) { fail(e); }
+            },
+          }));
+        }
+        box.appendChild(chip);
+      }
     }
+    const n = State.customMotifs.length;
+    const c = $('#customCount');
+    if (c) c.textContent = n ? `(${n})` : '';
+  }
+
+  /* ---------------- add-a-motif form ---------------- */
+  const cmSelected = { activates: new Set(), represses: new Set() };
+
+  function renderCellTypePicker() {
+    const box = $('#cmActivates');
+    if (!box) return;
+    clear(box);
+    for (const ct of State.cellTypes) {
+      const on = cmSelected.activates.has(ct.id);
+      const off = cmSelected.represses.has(ct.id);
+      box.appendChild(h('div', {
+        class: 'chip',
+        style: {
+          borderLeftColor: on ? 'var(--accent)' : off ? 'var(--danger)' : 'var(--line)',
+          opacity: (on || off) ? '1' : '0.6',
+        },
+        title: 'click = activates, shift-click = represses',
+        onclick: (ev) => {
+          const set = ev.shiftKey ? cmSelected.represses : cmSelected.activates;
+          const other = ev.shiftKey ? cmSelected.activates : cmSelected.represses;
+          other.delete(ct.id);
+          set.has(ct.id) ? set.delete(ct.id) : set.add(ct.id);
+          renderCellTypePicker();
+        },
+      }, h('span', { text: (ct.label || ct.id).split(' (')[0] }),
+         on ? h('span', { class: 'cons', text: 'on' }) : null,
+         off ? h('span', { class: 'cons', text: 'off' }) : null));
+    }
+  }
+
+  function showMotifForm(show) {
+    const f = $('#motifForm');
+    if (!f) return;
+    f.style.display = show ? '' : 'none';
+    if (show) {
+      $('#cmError').textContent = '';
+      $('#cmName').focus();
+    }
+  }
+
+  async function saveMotif() {
+    const err = $('#cmError');
+    err.textContent = '';
+    const kind = $('#cmKind').value;
+    const body = {
+      name: $('#cmName').value,
+      kind,
+      typical_offset: parseInt($('#cmOffset').value || '-60', 10),
+      color: $('#cmColor').value.trim(),
+      notes: $('#cmNotes').value,
+      author: ($('#playerName').value || '').trim(),
+    };
+    if ($('#cmMode').value === 'pwm') body.pwm = $('#cmPwm').value;
+    else body.consensus = $('#cmConsensus').value;
+    if (kind === 'celltype_element') {
+      body.activates = Array.from(cmSelected.activates);
+      body.represses = Array.from(cmSelected.represses);
+    }
+    const btn = $('#cmSave');
+    btn.disabled = true;
+    try {
+      const res = await API.post('/api/motifs/custom', body);
+      await App.reloadMotifs();
+      showMotifForm(false);
+      ['#cmName', '#cmConsensus', '#cmPwm', '#cmNotes', '#cmColor'].forEach(sel => { $(sel).value = ''; });
+      cmSelected.activates.clear(); cmSelected.represses.clear();
+      renderCellTypePicker();
+      toast(`added "${res.motif.name}" (${res.motif.consensus})`);
+      changed();
+    } catch (e) {
+      // Validation messages are written for the user; show them in place.
+      err.textContent = e.message || String(e);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  function initMotifForm() {
+    if (!$('#btnAddMotif')) return;
+    $('#btnAddMotif').onclick = () => showMotifForm($('#motifForm').style.display === 'none');
+    $('#cmCancel').onclick = () => showMotifForm(false);
+    $('#cmSave').onclick = saveMotif;
+    $('#btnManageMotifs').onclick = () => {
+      if (!State.customMotifs.length) return toast('no motifs of your own yet', true);
+      manageMode = !manageMode;
+      $('#btnManageMotifs').classList.toggle('primary', manageMode);
+      renderPalette();
+    };
+    $('#cmMode').addEventListener('change', () => {
+      const pwm = $('#cmMode').value === 'pwm';
+      $('#cmPwmWrap').style.display = pwm ? '' : 'none';
+      $('#cmConsensusWrap').style.display = pwm ? 'none' : '';
+    });
+    $('#cmKind').addEventListener('change', () => {
+      const ct = $('#cmKind').value === 'celltype_element';
+      $('#cmCellTypes').style.display = ct ? '' : 'none';
+      $('#cmOffset').value = ct ? -120 : -60;
+      if (ct) renderCellTypePicker();
+    });
+    renderCellTypePicker();
   }
 
   /* ================= element list ================= */
@@ -762,6 +890,7 @@ const Designer = (() => {
       } catch (e) { fail(e); }
     };
 
+    initMotifForm();
     document.addEventListener('keydown', onKey);
     Bus.on('design:changed', changed);
   }

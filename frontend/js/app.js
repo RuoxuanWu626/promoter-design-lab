@@ -27,6 +27,7 @@ const App = (() => {
       State.motifs = motifs.motifs;
       State.motifById = Object.fromEntries(motifs.motifs.map(m => [m.id, m]));
       State.celltypeElements = motifs.celltype_elements || [];
+      State.customMotifs = motifs.custom_motifs || [];
       State.extraElements = motifs.extra_elements;
       State.provenance = motifs.provenance;
       State.models = models;
@@ -48,6 +49,7 @@ const App = (() => {
       fillSelect('#m1Element',
         State.motifs.map(m => ({ id: m.id, label: 'core · ' + m.name }))
           .concat(State.celltypeElements.map(e => ({ id: e.id, label: 'lineage · ' + e.name })))
+          .concat(State.customMotifs.map(e => ({ id: e.id, label: 'yours · ' + e.name })))
           .concat(State.extraElements.map(e => ({ id: e.id, label: e.name }))),
         'id', 'label', 'gata');
       fillSelect('#m1Model',
@@ -217,7 +219,27 @@ const App = (() => {
         'residual and tau mean without changing how the plots look.')));
   }
 
-  return { boot, showView };
+  /* Re-read the motif library after the user adds or deletes one, and refresh
+   * everything that renders from it. */
+  async function reloadMotifs() {
+    const motifs = await API.get('/api/motifs');
+    State.motifs = motifs.motifs;
+    State.motifById = Object.fromEntries(motifs.motifs.map(m => [m.id, m]));
+    State.celltypeElements = motifs.celltype_elements || [];
+    State.customMotifs = motifs.custom_motifs || [];
+    Designer.renderPalette();
+    const sel = $('#m1Element');
+    const keep = sel.value;
+    fillSelect('#m1Element',
+      State.motifs.map(m => ({ id: m.id, label: 'core · ' + m.name }))
+        .concat(State.celltypeElements.map(e => ({ id: e.id, label: 'lineage · ' + e.name })))
+        .concat(State.customMotifs.map(e => ({ id: e.id, label: 'yours · ' + e.name })))
+        .concat(State.extraElements.map(e => ({ id: e.id, label: e.name }))),
+      'id', 'label', keep);
+    renderAbout();
+  }
+
+  return { boot, showView, reloadMotifs };
 })();
 
 window.addEventListener('DOMContentLoaded', App.boot);

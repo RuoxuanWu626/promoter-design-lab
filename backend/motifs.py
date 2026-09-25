@@ -254,9 +254,20 @@ def get_library(path: str | None = None) -> dict[str, Motif]:
     lib = {m.id: m for m in _LIBRARY_SPEC}
 
     # Imported here rather than at module scope to avoid a circular import;
-    # celltype_elements builds Motif objects.
+    # both of these build Motif objects.
     from celltype_elements import build_elements
     lib.update(build_elements())
+
+    # Whatever the user has defined. Loaded last so a custom motif cannot
+    # silently shadow a built-in -- custom_motifs.validate refuses reserved
+    # ids, and this ordering means a stale file cannot either.
+    try:
+        from custom_motifs import build_motifs
+        for mid, motif in build_motifs().items():
+            if mid not in lib:
+                lib[mid] = motif
+    except Exception as exc:  # pragma: no cover - diagnostics only
+        print(f"[motifs] could not load custom motifs: {exc}")
 
     if path is None:
         here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -319,9 +330,48 @@ def library_order() -> list[str]:
 
 
 def celltype_element_order() -> list[str]:
-    """The lineage TF sites, which are a separate library (see celltype_elements)."""
+    """The built-in lineage TF sites (see celltype_elements)."""
     from celltype_elements import CELLTYPE_ELEMENT_IDS
     return list(CELLTYPE_ELEMENT_IDS)
+
+
+def custom_motif_order() -> list[str]:
+    """Ids of user-defined motifs, in the order they were added."""
+    try:
+        from custom_motifs import order
+        return [m for m in order() if m in get_library()]
+    except Exception:
+        return []
+
+
+def celltype_kind_ids() -> list[str]:
+    """Every motif that behaves as a lineage site, built-in or user-defined.
+
+    Used for background scrubbing, so a custom lineage site the user added is
+    cleared out of the background too rather than being left to compete with
+    the copy they place deliberately.
+    """
+    lib = get_library()
+    return [mid for mid, m in lib.items()
+            if getattr(m, "kind", "core_promoter") == "celltype_element"]
+
+
+def invalidate_cache() -> None:
+    """Drop every cache that depends on the motif library.
+
+    Adding or removing a motif changes what the scanners find, which changes
+    every prediction, so the adapters' prediction cache has to go too -- and
+    the per-motif null-distribution thresholds, which are keyed by motif id and
+    would otherwise be stale if an id were reused.
+    """
+    global _cache
+    _cache = None
+    _NULL_CACHE.clear()
+    try:
+        import adapters
+        adapters.clear_cache()
+    except Exception:
+        pass
 
 
 def core_library() -> dict:

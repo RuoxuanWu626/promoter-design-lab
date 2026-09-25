@@ -25,6 +25,25 @@ from motifs import celltype_element_order, get_library, null_threshold
 FAILS: list[str] = []
 CHECKS = [0]
 
+# Whatever motifs a deployment has defined are set aside for the duration of
+# the run and restored at the end. Without this the tests measure the live
+# server's library: a user motif that overlaps a built-in -- say AGATWAGA,
+# which also matches the GATA consensus AGATAAGA -- makes both fire on the
+# same bases and quietly changes which cell type wins.
+import custom_motifs as _CM
+
+_SAVED_CUSTOM = _CM.list_motifs()
+for _m in _SAVED_CUSTOM:
+    _CM.remove(_m["id"])
+
+
+def _restore_custom() -> None:
+    for _m in _SAVED_CUSTOM:
+        try:
+            _CM.add({**_m, "replace": True})
+        except Exception:
+            pass
+
 
 def check(name: str, ok: bool, detail: str = "") -> None:
     CHECKS[0] += 1
@@ -271,6 +290,89 @@ check("background-occurring motifs are annotated, not counted as 'elsewhere'",
       or _attr["patches_on_celltype_elements"] > 0)
 
 # ---------------------------------------------------------------------------
+section("user-defined motifs")
+
+CM = _CM
+
+_reject = [
+    (dict(name="x", consensus="ACGTZZ"), "non-IUPAC letters"),
+    (dict(name="x", consensus="AC"), "too short"),
+    (dict(name="x", consensus="NNNNNNNN"), "matches everything"),
+    (dict(name="clash", id="tata", consensus="ACGTACGT"), "reserved id"),
+    (dict(consensus="ACGTACGT"), "no name"),
+]
+_bad_accepted = []
+for _spec, _why in _reject:
+    try:
+        CM.add(_spec)
+        _bad_accepted.append(_why)
+    except CM.InvalidMotif:
+        pass
+check("invalid motif definitions are refused with a readable reason",
+      not _bad_accepted, f"accepted: {_bad_accepted}" if _bad_accepted else "all five refused")
+
+_entry = CM.add(dict(name="Selftest site", consensus="AGATWAGA",
+                     kind="celltype_element", activates=["HepG2"],
+                     typical_offset=-130))
+check("a custom motif joins the library", _entry["id"] in get_library(),
+      f"id {_entry['id']}")
+check("a custom motif gets a calibrated detection threshold",
+      null_threshold(get_library()[_entry["id"]]) > 0)
+check("a custom lineage site is scrubbed from backgrounds like a built-in",
+      _entry["id"] in __import__("motifs").celltype_kind_ids())
+
+_jaspar = ("A [ 0 3 79 40 66 48 65 11 65 0 ]\n"
+           "C [94 75 4 3 1 2 5 2 3 3 ]\n"
+           "G [ 1 0 3 4 1 0 5 3 28 88 ]\n"
+           "T [ 2 19 11 50 29 47 22 81 1 6 ]")
+_pwm_entry = CM.add(dict(name="Selftest PWM", pwm=_jaspar, kind="core_promoter"))
+check("a pasted JASPAR-style matrix is parsed",
+      len(_pwm_entry["consensus"]) == 10,
+      f"consensus {_pwm_entry['consensus']}")
+
+_bg_u = S.random_background(length=2001, gc=0.45, cpg_oe=0.25, seed=42)
+_core_u = [{"element_id": "tata", "position": -31},
+           {"element_id": "inr", "position": 0},
+           {"element_id": "sp1", "position": -52}]
+
+
+def _tau_of(placements):
+    con_ = S.build_construct(_bg_u["sequence"], _bg_u["tss_index"],
+                             S.to_placements(placements), seed=1)
+    pr = adapters.predict_celltype("mock_alphagenome", con_["sequence"],
+                                   con_["tss_index"], None, (-500, 500))
+    act = np.array([
+        scoring.activity_from_profile(pr.profiles[i], pr.positions, (-200, 200), "mean")
+        for i in range(len(pr.cell_types))])
+    m = scoring.celltype_metrics(list(pr.cell_types), act)
+    return m["tau"], m["strongest_cell_type"]
+
+
+_t_base, _ = _tau_of(_core_u)
+_t_user, _strong_user = _tau_of(
+    _core_u + [{"element_id": _entry["id"], "position": p} for p in (-160, -120)])
+check("a user-defined lineage site drives the cell type it was assigned",
+      _strong_user == "HepG2" and _t_user > _t_base + 0.1,
+      f"tau {_t_base:.3f} -> {_t_user:.3f}, strongest {_strong_user}")
+
+_p_no = adapters.predict_profile("puffin", S.build_construct(
+    _bg_u["sequence"], _bg_u["tss_index"], S.to_placements(_core_u), seed=1)["sequence"],
+    _bg_u["tss_index"], (-300, 300))
+_p_yes = adapters.predict_profile("puffin", S.build_construct(
+    _bg_u["sequence"], _bg_u["tss_index"], S.to_placements(
+        _core_u + [{"element_id": _entry["id"], "position": p} for p in (-160, -120)]),
+    seed=1)["sequence"], _bg_u["tss_index"], (-300, 300))
+check("the real model responds to a custom motif's bases, not to its label",
+      not np.array_equal(np.asarray(_p_no.tracks["plus"]),
+                         np.asarray(_p_yes.tracks["plus"])),
+      "Puffin has no filter for it but does see the sequence")
+
+check("deleting a custom motif removes it from the library",
+      CM.remove(_entry["id"]) and _entry["id"] not in get_library())
+CM.remove(_pwm_entry["id"])
+check("the custom library is empty again after cleanup", not CM.list_motifs())
+
+# ---------------------------------------------------------------------------
 section("model agreement")
 
 _ent = [
@@ -335,6 +437,10 @@ check("unavailable real adapters explain why",
           if not m["available"]))
 
 # ---------------------------------------------------------------------------
+_restore_custom()
+if _SAVED_CUSTOM:
+    print(f"\n(restored {len(_SAVED_CUSTOM)} user-defined motif(s) set aside for the run)")
+
 print(f"\n{'=' * 60}")
 if FAILS:
     print(f"{len(FAILS)} of {CHECKS[0]} checks FAILED:")

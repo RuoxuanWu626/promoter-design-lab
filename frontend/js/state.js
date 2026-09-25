@@ -4,6 +4,7 @@ const State = {
   motifs: [],            // Puffin's 10 core promoter motifs
   motifById: {},
   celltypeElements: [],  // lineage TF sites (celltype_elements.py)
+  customMotifs: [],      // user-defined (custom_motifs.py)
   extraElements: [],     // cpg_segment, custom
   models: null,          // /api/models
   cellTypes: [],         // [{id,label,...}]
@@ -36,6 +37,7 @@ const State = {
   elementMeta(id) {
     return this.motifById[id] ||
       this.celltypeElements.find(e => e.id === id) ||
+      this.customMotifs.find(e => e.id === id) ||
       this.extraElements.find(e => e.id === id) ||
       { id, name: id, color: '#7f8c8d' };
   },

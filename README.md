@@ -17,7 +17,7 @@ adapter produced it.
 ```bash
 git clone git@github.com:RuoxuanWu626/promoter-design-lab.git
 cd promoter-design-lab
-python3 backend/selftest.py          # 57 invariant checks
+python3 backend/selftest.py          # 66 invariant checks
 ```
 
 Python 3 + numpy runs the mock adapters. Real Puffin additionally needs
@@ -73,6 +73,32 @@ independently reproduces **TATA at −31** and the U1 site downstream at +76.
 Detection thresholds are set per motif at a fixed false-positive rate under a
 realistic background, so motifs with very different information content (TATA
 carries 0.46 bits per position, NRF1 1.27) are handled on the same footing.
+
+## Adding your own motifs
+
+Anything not in Puffin's ten or the lineage list goes in a third library you
+control, from the **Your motifs** panel in the Design tab. Define one by IUPAC
+consensus (`AGATWAGA`) or by pasting a PWM — JASPAR-style 4 rows of counts or
+MEME-style one row per position, both accepted. Choose whether it behaves as a
+core promoter motif or a lineage site, and if the latter, which cell types it
+turns on (click) or represses (shift-click).
+
+Custom motifs are stored server-side in `data/custom_motifs.json`, so they
+persist and everyone on the same server sees them — which matters, because
+challenges are shared. They are scanned, thresholded and scrubbed exactly like
+built-ins; nothing special-cases them.
+
+One thing to be clear about. Placing a custom motif **writes real bases**, so
+every model reacts to it, *including real Puffin* — not because Puffin knows
+your motif, but because it sees the sequence. If your motif happens to contain
+a GC-box, Puffin will respond to the GC-box. What a custom motif cannot do is
+teach a trained model a new preference: the cell-type assignments only steer
+the mock cell-type adapter, which is explicit about being a caricature.
+
+Overlapping definitions both fire. A custom `AGATWAGA` also matches the
+built-in GATA consensus `AGATAAGA`, so both contribute on the same bases. That
+is correct, and worth remembering when a designed site does not behave as
+expected.
 
 ## Two libraries, on purpose
 
@@ -205,12 +231,13 @@ backend/
   extract_puffin_motifs.py  derives the motif library from the checkpoint
   motifs.py              library, PWM scanning, null-distribution thresholds
   celltype_elements.py   lineage TF sites (the second library)
+  custom_motifs.py       user-defined motifs (the third), validation + storage
   sequence.py            background generation, scrubbing, construct assembly
   experiments.py         position scans, attribution, pair/grid/spacing
   scoring.py             metrics, tau, specificity split, Pearson r
   store.py               players, challenges, leaderboard
   adapters/              real + mock adapters behind two interfaces
-  selftest.py            57 invariant checks
+  selftest.py            66 invariant checks
 frontend/                vanilla JS, canvas plots, no dependencies
-data/                    store.json, runs, puffin_motifs.npz (generated)
+data/                    store.json, custom_motifs.json, runs, puffin_motifs.npz
 ```
